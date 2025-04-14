@@ -1,0 +1,2247 @@
+---
+title: |
+  ![](logo_blk.png){width=5in}  
+  Naked mole rat metagenomics analysis
+author: "Ceylan Tanes"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=5,
+  fig.height=3,
+  fig.align = "center"
+  )
+```
+
+```{r child = 'calico_preamble.Rmd'}
+```
+
+
+```{r}
+### protein alignments 
+prot_align_dir <- file.path(data_dir, "sbx_gene_family")
+
+# download these files to local computer 
+#ec_fp <- "/mnt/isilon/microbiome/analysis/biodata/kegg-download-20190228/ec.list"
+#ko_ec_fp <- "/mnt/isilon/microbiome/analysis/biodata/kegg-download-20190228/ftp.bioinformatics.jp/kegg/genes/ko/ko_enzyme.list"
+#butyrate_info_fp <- "/mnt/isilon/microbiome/analysis/biodata/butyrate/butyrate_20180612_gene_info_full.tsv"
+ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ec.list"
+ko_ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ko_enzyme.list"
+butyrate_info_fp <- "/Users/tanesc/Documents/DBs/butyrate/butyrate_20180612_gene_info_full.tsv"
+```
+
+```{r}
+read_gene_aln_results <- function(base_dir, s, taxon_info=F) {
+  gene_results <- data_frame(FileName = list.files(
+    base_dir, pattern="*_1.txt")) %>%
+    group_by(FileName) %>%
+    mutate(fileSize = file.info(file.path(base_dir, FileName))$size) %>%
+    ungroup() %>%
+    filter(fileSize > 25) %>% # delete empty files
+    group_by(FileName) %>%
+    do(read.delim(file.path(base_dir, .$FileName), stringsAsFactors = F)) %>%
+    ungroup() %>%
+    mutate(SampleID = sub("_1.txt", "", FileName, perl=T)) %>%
+    select(-FileName) 
+  
+  if (taxon_info) {
+    gene_results %>%
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, nesting(geneID, taxon), fill = list(count=0)) %>%
+      filter(!is.na(geneID)) 
+  } else {
+    gene_results %>%
+      group_by(SampleID, geneID) %>%
+      summarize(count = sum(count)) %>%
+      ungroup() %>%
+      
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, geneID, fill = list(count=0)) %>%
+      filter(!is.na(geneID))
+  }
+  
+}
+```
+
+
+
+```{r}
+#ad in data
+kegg <- read_gene_aln_results(file.path(prot_align_dir, "20190228_kegg_species_prokaryotes"), s, taxon_info=F) %>%
+  group_by(SampleID) %>%
+  mutate(total_kegg = sum(count)) %>%
+  ungroup() %>%
+  filter(total_kegg >0) %>%
+  mutate(props = count / total_kegg)
+```
+
+```{r kegg beta diversity}
+kegg_matrix <- pivot_to_numeric_matrix(kegg, SampleID, geneID, props)
+bc_kegg <- vegdist(kegg_matrix)
+```
+
+
+```{r}
+ec_names <- read_delim(ec_fp, delim='\t', col_names = F) %>%
+  setNames(c("EC_id", "EC_desc")) %>%
+  separate(EC_desc, into=c("EC_desc", "rest"), extra = "merge", sep = ';') %>%
+  select(-rest)
+
+kegg_names <- read_delim("/Users/tanesc/Documents/DBs/kegg/ko.list", delim='\t', col_names = F) %>%
+  setNames(c("geneID", "gene_desc")) %>%
+  mutate(geneID = sub("ko:", "", geneID))
+
+kegg_info <- read.delim(ko_ec_fp, stringsAsFactors = F, sep='\t', header = F) %>%
+  setNames(c("geneID", "EC_id")) %>%
+  mutate(geneID = sub("ko:", "", geneID)) %>%
+  group_by(geneID) %>%
+  mutate(weight = 1/n()) %>%
+  ungroup()
+
+kegg_ec <- kegg %>%
+  left_join(kegg_info, by="geneID") %>%
+  mutate(count = count*weight, props = props*weight) %>%
+  group_by(SampleID, EC_id) %>%
+  summarize(count = sum(count), props = sum(props)) %>%
+  ungroup() %>%
+  filter(!is.na(EC_id))
+
+kegg_gh <- kegg_ec %>%
+  filter(grepl("ec:3\\.2\\.1\\.", EC_id)) %>%
+  droplevels()
+
+
+
+```
+
+```{r}
+pathway2ko <- read.delim("/Users/tanesc/Documents/DBs/kegg/pathway_ko.list", stringsAsFactors = F, sep='\t', header = F) %>%
+  setNames(c("Pathway", "geneID")) %>%
+  mutate(geneID = sub("ko:", "", geneID))
+
+prok_pathway_names <- read_delim("/Users/tanesc/Documents/DBs/kegg/prokaryotic_pathway.list", col_names = F, col_types = 'cc') %>%
+  setNames(c("Pathway", "Pathway_names")) %>%
+  mutate(Pathway = paste0("path:ko", Pathway))
+
+kegg_pathway <- kegg %>%
+  left_join(pathway2ko, by="geneID") %>%
+  group_by(SampleID, Pathway) %>%
+  summarize(props = sum(props)) %>%
+  ungroup() %>%
+  inner_join(prok_pathway_names, by="Pathway") 
+
+
+## calculate the number of genes in each pathway for enrichment analysis
+num_gene_universe <- length(unique(kegg$geneID))
+
+num_genes_in_pathway <- pathway2ko %>%
+  filter(geneID %in% unique(kegg$geneID)) %>%
+  group_by(Pathway) %>%
+  summarize(num_genes_in_path = n()) %>%
+  ungroup()
+```
+
+```{r}
+butyrate_info <- read.delim("/Users/tanesc/Documents/DBs/butyrate/butyrate_20180612_gene_info_full.tsv", stringsAsFactors = F) %>%
+  select(geneID="gene_name", taxon=Genome.Name, pathway_name) %>%
+  group_by(geneID, taxon, pathway_name) %>%
+  slice(1) %>%
+  ungroup()
+
+but_bai_bsh_ipa <- bind_rows(
+  read_gene_aln_results(file.path(prot_align_dir, "butyrate_20180612"), s, taxon_info=T) %>%
+    left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+    mutate(database = "Butyrate"),
+  read_gene_aln_results(file.path(prot_align_dir, "bai.operon_20180801"), s, taxon_info=T) %>%
+    mutate(database = "Bai"),
+  read_gene_aln_results(file.path(prot_align_dir, "bsh_20180214"), s, taxon_info=T) %>%
+    mutate(database = "BSH"),
+  read_gene_aln_results(file.path(prot_align_dir, "IPA_proteins"), s, taxon_info=T) %>%
+    mutate(database = "IPA")
+) %>%
+  left_join(select(s,SampleID, nonhost), by="SampleID") %>%
+  mutate(props = count/nonhost) %>%
+  group_by(SampleID, geneID, database, pathway_name) %>%
+  summarize(count = sum(count), props = sum(props)) %>% # get rid of taxon information
+  ungroup()
+```
+
+
+
+# Comparison of age groups (NMR and mice)
+
+```{r}
+## samples "c.013.357.563", "c.013.371.008",  are age 15: doesn't fit into a category
+extra_data <- data_frame(
+  SampleID = c("c.013.380.331", 
+               "c.013.519.256", "c.013.528.278", "c.057.554.626", "c.107.779.295", 
+               "c.33.568.581", "c.35.783.796", "c.35.806.621", "c.838.383.882", "c.838.519.363"),
+  study_group4_extra = c("Middle Aged", rep("Old", 4), rep("Young", 5))) %>%
+  mutate(SampleID = as.character(SampleID))
+
+
+s_toTest <- s %>%
+  filter(!is.na(study_group4)) %>%
+  filter(!SampleID %in% c("c.013.357.563", "c.013.371.008")) %>%
+  mutate(age_groups = ifelse(is.na(age_groups), as.character(study_group4), as.character(age_groups))) %>%
+  #filter(!age_groups %in% c("NMR F not pregnant", "NMR M breeder")) %>%
+  droplevels() %>%
+  left_join(extra_data, by="SampleID") %>%
+  mutate(age_groups = ifelse(!is.na(study_group4_extra), study_group4_extra, as.character(age_groups))) %>%
+  mutate(age_categories = ifelse(age_groups == "7 to 8", NA, as.character(age_groups))) %>%
+  mutate(age_categories = factor(age_categories)) %>%
+  mutate(age_categories = fct_collapse(age_categories, S1=c("1 to 4", "mouse 3 month", "Young"), S2=c("11 to 13", "mouse 13 month", "Middle Aged"), S3=c("17 to 18", "mouse 18 month"), S4=c("26 to 33", "mouse 25 month", "Old"))) %>%
+  mutate(age_categories_linear = factor(age_categories, ordered=T)) %>%
+  filter(!is.na(age_categories)) %>%
+  mutate(percent_lifespan = ifelse(HostSpecies=="Mouse", age/3, age/40))
+
+pander(table(s_toTest$age_categories, s_toTest$HostSpecies), caption = "Number of samples in each category. Mice at age 13 - 14.5 month are included in S2")
+
+s_toTest %>%
+  ggplot(aes(x=percent_lifespan)) +
+    geom_histogram() +
+    facet_wrap(~HostSpecies)
+
+
+s_age <- s_toTest
+```
+
+
+
+## KEGG
+
+Reads were aligned to the Kyoto Encyclopedia of Genes and Genomes (downloaded on February 28, 2019) using diamond sequence aligner (PMID:33828273). The resulting protein hits were mapped to KEGG ortholog database. Below is a PCoA plot of Bray-Curtis distances using relative abundances of KEGG orthologs.
+
+```{r}
+## overview PCoA plot of KEGG assignments
+s_toTest %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=age_categories) +
+    facet_wrap(~HostSpecies) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    theme_clean_pcoa() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    labs(color="Age categories")
+```
+
+### Fig 1F: KEGG bc PCoA
+```{r eval=F}
+
+dist_toTest <- dist_subset(bc_kegg, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=age_categories, shape=HostSpecies)) +
+    geom_point() +
+    scale_shape_manual(values=c(17,16)) + 
+    scale_color_viridis(end=0.8, discrete = T) +
+    theme_clean_pcoa() + 
+
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="Age\ngroup") +
+    guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+ggsave("Fig1F_calico_kegg_bc_pcoa.pdf", height = 2.5, width=5, useDingbats=F)
+```
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(HostSpecies) %>%
+  do(adonispost(., distmat=bc, formula = distmat ~ age_categories, sample_id_var = SampleID, perm=999, which=age_categories, alpha=1)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("term", "sumsq"))) %>%
+  
+  group_by(HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_categories) %>%
+  do(adonisplus(., distmat=bc, formula = distmat ~ HostSpecies, sample_id_var = SampleID, perm=999)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  #select(-one_of(c("term", "sumsq"))) %>%
+  
+  #group_by(HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## KEGG pathways
+
+```{r}
+kegg_pathway_toTest <- kegg_pathway %>%
+  right_join(mutate(s_toTest, SampleID=SampleID), by="SampleID") %>%
+  
+  group_by(Pathway) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names, age_categories) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ HostSpecies, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term, age_categories) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(2), width = "8em")
+```
+
+
+```{r fig.width=10, fig.height=15}
+summaries_df %>%
+  mutate(effect_size = estimate / std.error) %>%
+  group_by(Pathway) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  group_by(Pathway) %>%
+  mutate(max_estimate = max(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_positive = rank(-max_estimate, ties.method="first")) %>%
+  
+  group_by(Pathway) %>%
+  mutate(min_estimate = min(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_negative = rank(min_estimate, ties.method="first")) %>%
+  
+  #filter(rank_positive <= 30 | rank_negative <= 30) %>%
+  
+  mutate(to_sort = ifelse(estimate < 0, min_estimate, max_estimate)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, color=age_categories, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nmice and NMRs at each age category",
+      y="", color="", shape=""
+    )
+    
+#ggsave("ivocaftor_Fig2B.pdf", height=5, width=7, useDingbats=F)
+```
+
+
+For each host species: props_log ~ age_categories
+
+THe table below shows only the pathways with p<0.06 in NMRs
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names, HostSpecies) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age_categories, data=.), term_string = "age_categories")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  #mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(HostSpecies == "Naked mole rat") %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+
+```{r fig.width=12, fig.height=6}
+summaries_df %>%
+  filter(term!="age_categories") %>%
+  mutate(effect_size = estimate / std.error) %>%
+  
+  group_by(Pathway, HostSpecies) %>%
+  mutate(avg_effect_size = mean(effect_size)) %>%
+  ungroup() %>%
+  group_by(Pathway) %>%
+  mutate(max_avg_effect_size = max(avg_effect_size)) %>%
+  ungroup() %>%
+  filter(abs(max_avg_effect_size) > 2) %>%
+  
+  #mutate(num_sig = sum(fdr < 0.05)) %>%
+  #ungroup() %>%
+  #filter(num_sig > 0) %>%
+  
+  group_by(Pathway) %>%
+  mutate(max_estimate = max(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_positive = rank(-max_estimate, ties.method="first")) %>%
+  
+  group_by(Pathway) %>%
+  mutate(min_estimate = min(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_negative = rank(min_estimate, ties.method="first")) %>%
+  
+  #filter(rank_positive <= 10 | rank_negative <= 10) %>%
+  
+  mutate(to_sort = ifelse(estimate < 0, min_estimate, max_estimate)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.75)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    facet_wrap(~HostSpecies) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nage categories",
+      y="", color="", shape=""
+    )
+    
+#ggsave("ivocaftor_Fig2B.pdf", height=5, width=7, useDingbats=F)
+```
+
+
+```{r fig.height=10}
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  
+  mutate(effect_size = estimate / std.error) %>%
+  
+  group_by(Pathway, HostSpecies) %>%
+  mutate(avg_effect_size = mean(effect_size)) %>%
+  ungroup() %>%
+  group_by(Pathway) %>%
+  mutate(max_avg_effect_size = max(avg_effect_size)) %>%
+  ungroup() %>%
+  filter(abs(max_avg_effect_size) > 2) %>%
+  
+  separate(term, into=c("y","x"), sep=" - ") %>%
+  mutate(y = fct_rev(factor(y))) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.20, "A", "B")) %>%
+  
+  mutate(Pathway_names = str_wrap(Pathway_names, width=17)) %>% 
+  
+  ggplot(aes(x=x, y=y, fill=estimate)) +
+    geom_tile() +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    #scale_fill_viridis(trans="log10", option="mako") +
+    #scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_fill_gradient2(low = "#365C8D", high = "#1FA187", mid="#F7F7F7", midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    facet_grid(Pathway_names ~ HostSpecies) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      #axis.text.x = element_blank(),
+      #axis.ticks.x = element_blank(),
+      legend.position = "bottom",
+      legend.key.width = unit(1, "cm"),
+      aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", fill="Difference between time points",
+      y=""
+    )
+ggsave("Fig1G_pathway_differences.pdf", height=13, width=5, useDingbats=F)
+```
+
+
+
+## KEGG: Methane production
+
+```{r}
+genes_of_interest <-  c("K03421", "K19147", "K14080", "K04480", "K18707", "K14081", "K14082", "K16176","K15962", "K16177",  "K16178", "K16179", "K14083", "K14084")
+
+genes_toTest <- kegg %>%
+  filter(geneID %in% genes_of_interest) %>%
+  left_join(kegg_names, by="geneID") %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+
+
+```
+
+
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, gene_desc, HostSpecies) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age_categories, data=.), term_string = "age_categories")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  #mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(HostSpecies == "Naked mole rat") %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+
+```{r eval=T}
+genes_toTest %>%
+  filter(geneID %in% (summaries_df %>% filter(fdr<0.1 & !is.na(estimate)) %>% pull(geneID) %>% unique())) %>%
+  filter(!is.na(age_categories)) %>%
+  
+  group_by(geneID) %>%
+  mutate(maxy = max(props) * 10) %>%
+  
+  mutate(HostSpecies = sub("Naked mole rat", "NMR", HostSpecies)) %>%
+
+  separate(gene_desc, sep = "\\[EC", into=c("gene_desc", "EC")) %>%
+  mutate(gene_desc = sub("---", " ", gene_desc)) %>%
+  mutate(gene_desc = str_wrap(gene_desc, width=20)) %>%
+  
+  ggplot(aes(x=HostSpecies, y=props, shape = HostSpecies)) +
+    geom_hline(aes(yintercept = maxy), color="white") +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75, aes(color=age_categories)) +
+    scale_shape_manual(values=c(17,16)) + 
+    facet_wrap(~gene_desc, scales = "free_y", ncol=4) +
+    scale_color_viridis(end=0.8, discrete = T) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      aspect.ratio=1
+    ) +
+    guides(shape="none") +
+    labs(
+      x="", color="",
+      y="Relative abundnace"
+    )
+ggsave("Fig_temp_methane_age_group.pdf", height=4, width=9, useDingbats=F)
+```
+
+## KEGG: Glycoside hydrolases
+
+The glycoside hydrolases break down complex carbohydrates into simpler sugars. They are annotated with the enzyme commission (EC) number of EC:3.2.1. The orthologs that map to these EC numbers were pulled from KEGG alignments. The enzymes that were present in more than half of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+
+For each age category:  props_log ~ HostSpecies
+
+```{r}
+genes_toTest <- kegg_gh %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(EC_id) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels()  %>%
+  
+  mutate(props = props + 1e-8) %>%
+  mutate(props_log = log10(props)) 
+```
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(EC_id, age_categories) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ HostSpecies, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term, age_categories) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  left_join(ec_names, by="EC_id") %>%
+#  select(EC_id, EC_desc, everything()) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(2, width = "9em") %>%
+#  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+
+
+
+```{r fig.height=20, fig.width=10, eval=F}
+isSig <- summaries_df %>%
+  filter(fdr<0.1) %>%
+  mutate(toMatch = paste(EC_id, age_categories))
+
+
+genes_toTest %>%
+  filter(EC_id %in% as.character(unique(isSig$EC_id))) %>%
+  left_join(ec_names, by="EC_id") %>%
+  
+  mutate(toMatch = paste(EC_id, age_categories)) %>%
+  mutate(isSig = ifelse(toMatch %in% isSig$toMatch, "q<0.1", "q>0.1")) %>%
+  
+  mutate(EC_id = paste(EC_id, EC_desc, sep='\n')) %>%
+  
+  ggplot(aes(x=age_categories, y=props, color=HostSpecies, shape=isSig)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~EC_id, scales="free", ncol = 3) +
+    scale_color_manual(values=ann_colors$HostSpecies) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      strip.background = element_blank(),
+      legend.position = "bottom" #,
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)
+    ) +
+    #guides(color=F) +
+    labs(
+      y="Relative abundance"
+    )
+```
+
+
+```{r fig.height=10, fig.width=10}
+summaries_df %>%
+  #filter(Taxa %in% taxa_of_interest) %>%
+  #filter(term == "Healthy - Barrett's") %>%
+  left_join(ec_names, by="EC_id") %>%
+  mutate(EC_id = paste(EC_id, EC_desc, sep=' ')) %>%
+  
+  
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=EC_id, y=estimate, color=age_categories, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~term) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated log difference between\nmice and NMRs at each age category",
+      x="", shape="", color=""
+    )
+
+```
+
+For each host species: props_log ~ age_categories
+
+```{r}
+summaries_df <- genes_toTest %>%
+  group_by(EC_id, HostSpecies) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  #do(tidy(lm(props_log ~ age_categories, data=.))) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age_categories, data=.), term_string = "age_categories")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  #mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  group_by(term, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  left_join(ec_names, by="EC_id") %>%
+#  select(EC_id, EC_desc, everything()) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(2, width = "9em") %>%
+#  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+```{r fig.height=12, fig.width=12}
+genes_toPlot <- summaries_df %>%
+  #filter(HostSpecies == "Naked mole rat") %>%
+  filter(fdr < 0.1) %>%
+  pull(EC_id) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  filter(EC_id %in% genes_toPlot) %>%
+  #filter(term == "Healthy - Barrett's") %>%
+  left_join(ec_names, by="EC_id") %>%
+  mutate(EC_id = paste(EC_id, EC_desc, sep=' ')) %>%
+  
+  
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=EC_id, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    facet_wrap(~HostSpecies) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$HostSpecies) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated log difference between\nage categories",
+      x="", shape="", color=""
+    )
+
+```
+
+
+
+## Butyrate, IPA, bai, BSH genes
+
+Proteins are aligned to butyrate producing genes (PMID:24757212), IPA producing genes (PMID:29168502), as well as bacterial enzymes responsible for bile acid modification bai and BSH (PMID:18757757). The enzymes that were present in more than a quarter of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+```{r eval=T}
+genes_toTest <- but_bai_bsh_ipa %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.25) %>%
+  droplevels() 
+```
+
+
+For each age category: props_log ~ HostSpecies
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  mutate(props = props + 1e-8) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  group_by(geneID, database, pathway_name, age_categories) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ HostSpecies, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term, age_categories) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  arrange(database, geneID) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:10), width = "4em")
+
+```
+
+```{r fig.height=10, fig.width=6}
+summaries_df %>%
+  mutate(geneID = paste(geneID, database, pathway_name)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate, color=age_categories, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~term) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated log difference between\nmice and NMRs at each age category",
+      x="", shape="", color=""
+    )
+
+```
+
+
+For each host species: props_log ~ age_categories
+
+```{r eval=T}
+summaries_df <- genes_toTest %>%
+  
+  mutate(props = props + 1e-8) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  group_by(geneID, database, pathway_name, HostSpecies) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age_categories, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  group_by(term, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  arrange(database, geneID) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:10), width = "4em")
+
+```
+
+
+
+```{r fig.height=3, fig.width=6}
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+summaries_df %>%
+  filter(geneID %in% genes_toPlot) %>%
+  
+  mutate(geneID = paste(geneID, database, pathway_name)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    facet_wrap(~HostSpecies) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated log difference between\nage categories",
+      x="", shape="", color=""
+    )
+
+```
+
+
+
+# Comparison of breeding status
+
+```{r}
+s_toTest <- s %>%
+  #filter(!is.na(SR_sg2) | !is.na(SR_sg3) | !is.na(SR_sg4)) %>%
+  filter(!is.na(study_group2)) %>%
+  mutate(breeding_status = fct_relevel(breeding_status, "Breeder Pregnant", after=Inf)) %>%
+  mutate(breeding_status = fct_relevel(breeding_status, "Non breeder", after=0)) %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding = fct_collapse(breeding_status, Breeder = c("Breeder Not Pregnant", "Breeder", "Breeder Pregnant"))) %>%
+  mutate(breeding = fct_rev(breeding)) %>%
+  
+  mutate(breeding_status_simple = sub(" Not Pregnant", "", breeding_status)) %>%
+  mutate(breeding_status_simple = sub("Breeder Pregnant", "Pregnant", breeding_status_simple)) %>%
+  mutate(breeding_status_simple = sub("Non breeder", "Non\nbreeder", breeding_status_simple)) %>%
+  mutate(breeding_status_simple = factor(breeding_status_simple)) %>%
+  mutate(breeding_status_simple = fct_relevel(breeding_status_simple, "Non\nbreeder", after=0)) %>%
+  
+  droplevels()
+
+pander(table(s_toTest$breeding_status, s_toTest$sex), caption = "Number of samples in each category")
+
+
+#pander(table(s_toTest$colony_number, s_toTest$breeding_status), caption = "Number of NMRs in each colony")
+
+s_toTest %>%
+  group_by(colony_number) %>%
+  summarize(num_NMRs = n())%>%
+  ungroup() %>%
+  group_by(num_NMRs) %>%
+  summarize(num_colony = n()) %>%
+  ungroup() %>%
+  pander(caption="Number of colonies with 1, 2, 3 NMRs in this subgroup (data available only for run1).")
+
+
+pub_colors <- setNames(brewer.pal(12, "Paired")[c(5,1,8, 2, 6)], levels(s_toTest$breeding_status_all))
+  
+
+s_social <- s_toTest
+```
+
+
+
+## KEGG
+
+Reads were aligned to the Kyoto Encyclopedia of Genes and Genomes (downloaded on February 28, 2019) using diamond sequence aligner (PMID:33828273). The resulting protein hits were mapped to KEGG ortholog database. Below is a PCoA plot of Bray-Curtis distances using relative abundances of KEGG orthologs.
+
+```{r}
+## overview PCoA plot of KEGG assignments
+s_toTest %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=breeding_status) +
+    facet_wrap(~sex) +
+    scale_color_manual(values=ann_colors$breeding_status) +
+    theme_clean_pcoa() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    labs(color="Breeding status")
+```
+
+
+```{r}
+dist_toTest <- dist_subset(bc_kegg, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pct <- round(pc$values$Relative_eig * 100)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names") %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) 
+
+
+centroids <- pc_df %>%
+  group_by(breeding_status_all, breeding_status_focus) %>%
+  summarize(Axis.1 = mean(Axis.1), Axis.2 = mean(Axis.2), Axis.3 = mean(Axis.3)) %>%
+  ungroup()
+
+pc_df %>%
+  
+  ggplot(aes(x=Axis.1, y=Axis.2, color=breeding_status_simple, shape=sex)) +
+    geom_point() +
+    #geom_point(data=centroids, shape=8) +
+    stat_ellipse(aes(group=breeding_status_simple)) +
+    scale_color_manual(values=ann_colors$breeding_status_simple) +
+    scale_shape_manual(values=c(1, 16)) + 
+    #geom_text_repel(data=filter(pc_df, Axis.1 < -0.25), aes(label=colony_number)) +
+    theme_clean_pcoa() +
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="Breeding\nstatus", title="")
+
+ggsave("Fig2D_PCoA_kegg_bc.pdf", height = 2.5, width=4.5, useDingbats=F)
+```
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  do(adonispost(
+    ., distmat = bc_kegg, formula = distmat ~ age + breeding_status_all,
+    sample_id_var = SampleID, permutations=999, which = breeding_status_all, alpha=1)) %>%
+  ungroup()  %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ age + breeding_status_focus,
+    sample_id_var = SampleID, permutations=999)) %>%
+  ungroup()  %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ age + sex * breeding,
+    sample_id_var = SampleID, permutations=999)) %>%
+  ungroup()  %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## KEGG pathways
+
+```{r}
+kegg_pathway_toTest <- kegg_pathway %>%
+  right_join(mutate(s_toTest, SampleID=SampleID), by="SampleID") %>%
+  
+  group_by(Pathway) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+props_log ~ age + breeding_status_all
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age + breeding_status_all, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+
+```{r fig.width=10, fig.height=6}
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  
+  group_by(Pathway) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  group_by(Pathway) %>%
+  mutate(max_estimate = max(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_positive = rank(-max_estimate, ties.method="first")) %>%
+  
+  group_by(Pathway) %>%
+  mutate(min_estimate = min(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_negative = rank(min_estimate, ties.method="first")) %>%
+  
+  #filter(rank_positive <= 30 | rank_negative <= 30) %>%
+  
+  mutate(to_sort = ifelse(estimate < 0, min_estimate, max_estimate)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nbreeding categories",
+      y="", color="", shape=""
+    )
+    
+#ggsave("ivocaftor_Fig2B.pdf", height=5, width=7, useDingbats=F)
+```
+
+props_log ~ age + breeding_status_focus
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  mutate(breeding_status_focus = fct_rev(breeding_status_focus)) %>%
+  group_by(Pathway, Pathway_names) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+paths_pregnant <- summaries_df %>% filter(fdr<0.05) %>% arrange(estimate) %>% filter(grepl("Pregnant", term)) %>% pull(Pathway_names)
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+
+```{r fig.width=10, fig.height=6}
+summaries_df %>%
+  filter(grepl("breeding_status", term)) %>%
+  
+  group_by(Pathway) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  group_by(Pathway) %>%
+  mutate(max_estimate = max(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_positive = rank(-max_estimate, ties.method="first")) %>%
+  
+  group_by(Pathway) %>%
+  mutate(min_estimate = min(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_negative = rank(min_estimate, ties.method="first")) %>%
+  
+  #filter(rank_positive <= 30 | rank_negative <= 30) %>%
+  
+  mutate(to_sort = ifelse(estimate < 0, min_estimate, max_estimate)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\npregnany females and all other NMRs",
+      y="", color="", shape=""
+    )
+    
+ggsave("Fig2D_calico_kegg_pathways.pdf", height=5, width=7, useDingbats=F)
+```
+
+
+props_log ~ age + sex * breeding
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names) %>%
+
+  do(tidy(lm(props_log ~ age + sex * breeding, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("breeding", "Non breeder - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+
+```{r fig.width=10, fig.height=6}
+summaries_df %>%
+  
+  group_by(Pathway) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  group_by(Pathway) %>%
+  mutate(max_estimate = max(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_positive = rank(-max_estimate, ties.method="first")) %>%
+  
+  group_by(Pathway) %>%
+  mutate(min_estimate = min(estimate)) %>%
+  ungroup() %>%
+  mutate(rank_negative = rank(min_estimate, ties.method="first")) %>%
+  
+  #filter(rank_positive <= 30 | rank_negative <= 30) %>%
+  
+  mutate(to_sort = ifelse(estimate < 0, min_estimate, max_estimate)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\npregnany females and all other NMRs",
+      y="", color="", shape=""
+    )
+    
+#ggsave("ivocaftor_Fig2B.pdf", height=5, width=7, useDingbats=F)
+```
+
+## KEGG: Methane production
+
+```{r}
+genes_of_interest <- pathway2ko %>%
+  filter(Pathway %in% c("path:ko00680")) %>%
+  pull(geneID)
+
+genes_toTest <- kegg %>%
+  filter(geneID %in% genes_of_interest) %>%
+  left_join(kegg_names, by="geneID") %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+
+
+```
+
+
+props_log ~ age + breeding_status_all
+
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, gene_desc) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age + breeding_status_all, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  #mutate(term = sub("breeding_status", "Non breeder - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  left_join(ec_names, by="EC_id") %>%
+  select(EC_id, EC_desc, everything()) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+```{r fig.height=8, fig.width=15}
+
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  filter(geneID %in% genes_toPlot) %>%
+  mutate(geneID = paste(geneID, gene_desc)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+
+
+props_log ~ age + breeding_status_focus
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  mutate(breeding_status_focus = fct_rev(breeding_status_focus)) %>%
+  group_by(geneID, gene_desc) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding_status_focus", "Other - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  left_join(ec_names, by="EC_id") %>%
+#  select(EC_id, EC_desc, everything()) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(2, width = "9em") %>%
+#  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+```{r fig.height=4, fig.width=10}
+
+genes_toPlot <- summaries_df %>%
+  filter(grepl("Other", term)) %>%
+  filter(fdr < 0.05) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  filter(geneID %in% genes_toPlot) %>%
+  mutate(geneID = paste(geneID, gene_desc)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+
+
+```{r}
+genes_toTest %>%
+  filter(geneID %in% genes_toPlot) %>%
+  mutate(geneID = paste(geneID, gene_desc)) %>%
+  
+  group_by(geneID) %>%
+  mutate(ymax = max(props)*1.3) %>%
+  #mutate(ymax = max(props)+0.0007) %>%
+  ungroup() %>%
+  mutate(ymax = ifelse(grepl("hdrA2", gene_desc), 0.005, ymax)) %>%
+  mutate(ymax = ifelse(grepl("gck", gene_desc), 0.0006, ymax)) %>%
+  
+  
+  separate(gene_desc, sep = "\\[", into=c("gene_desc", "EC")) %>%
+  mutate(gene_desc = str_wrap(gene_desc, width=20)) %>%
+  ggplot(aes(x=breeding_status_simple, y=props, color=breeding_status_simple, shape = sex)) +
+    geom_hline(aes(yintercept = ymax), color="white") +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$breeding_status_simple) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    scale_shape_manual(values=c(1,16)) +
+    facet_wrap(~gene_desc, scales="free") +
+    theme_clean() +
+    labs(
+      x="", y="Relative abundance", shape="", color=""
+    )
+ggsave("Fig2E_mathane_genes.pdf", height=5, width=8.5, useDingbats=F)
+```
+
+
+## KEGG: Glycoside hydrolases
+
+The glycoside hydrolases break down complex carbohydrates into simpler sugars. They are annotated with the enzyme commission (EC) number of EC:3.2.1. The orthologs that map to these EC numbers were pulled from KEGG alignments. The enzymes that were present in more than half of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+```{r}
+genes_toTest <- kegg_gh %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(EC_id) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+props_log ~ age + breeding_status_all
+
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(EC_id) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age + breeding_status_all, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  #mutate(term = sub("breeding_status", "Non breeder - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  left_join(ec_names, by="EC_id") %>%
+  select(EC_id, EC_desc, everything()) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+```{r fig.height=8, fig.width=10}
+
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(EC_id) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  filter(EC_id %in% genes_toPlot) %>%
+  left_join(ec_names, by="EC_id") %>%
+  mutate(EC_id = paste(EC_id, EC_desc)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  
+  ggplot(aes(x=EC_id, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+
+props_log ~ age + breeding_status_focus
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  
+  group_by(EC_id) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding_status_focus", "Pregnant female - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  left_join(ec_names, by="EC_id") %>%
+  select(EC_id, EC_desc, everything()) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(2, width = "9em") %>%
+  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+```{r fig.height=8, fig.width=10}
+
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(EC_id) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  filter(EC_id %in% genes_toPlot) %>%
+  left_join(ec_names, by="EC_id") %>%
+  mutate(EC_id = paste(EC_id, EC_desc)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  
+  ggplot(aes(x=EC_id, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+
+props_log ~ age + sex * breeding
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(EC_id) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + sex * breeding, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding", "Non breeder - ", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  left_join(ec_names, by="EC_id") %>%
+  select(EC_id, EC_desc, everything()) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(2, width = "9em") %>%
+  column_spec(c(1,3:8), width = "4em")
+
+
+
+```
+
+
+## Butyrate, IPA, bai, BSH genes
+
+Proteins are aligned to butyrate producing genes (PMID:24757212), IPA producing genes (PMID:29168502), as well as bacterial enzymes responsible for bile acid modification bai and BSH (PMID:18757757). The enzymes that were present in more than a quarter of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+```{r eval=T}
+genes_toTest <- but_bai_bsh_ipa %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.25) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+props_log ~ age + breeding_status_all
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, database, pathway_name) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age + breeding_status_all, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  #mutate(term = sub("breeding_status", "Non breeder - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  arrange(database, geneID) %>%
+  kable_style(fdr, 0.1) %>%
+  #column_spec(2, width = "9em") %>%
+  column_spec(c(1:10), width = "4em")
+
+```
+
+```{r fig.height=8, fig.width=10}
+
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  filter(geneID %in% genes_toPlot) %>%
+  mutate(geneID = paste(geneID, database, pathway_name)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+
+props_log ~ age + breeding_status_focus
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  
+  group_by(geneID, database, pathway_name) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding_status_focus", "Pregnant female - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  arrange(database, geneID) %>%
+  kable_style(fdr, 0.1) %>%
+  #column_spec(2, width = "9em") %>%
+  column_spec(c(1:10), width = "4em")
+
+```
+
+```{r fig.height=6, fig.width=8}
+
+genes_toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+
+summaries_df %>%
+  filter(term!="age") %>% 
+  
+  filter(geneID %in% genes_toPlot) %>%
+  mutate(geneID = paste(geneID, database, pathway_name)) %>%
+  
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  
+  ggplot(aes(x=geneID, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.25)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    #facet_wrap(~sex) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_groups) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    ) +
+    labs(
+      y="Estimated difference in relative abundances\n(log transformed)",
+      x="", shape="", color=""
+    )
+
+```
+
+props_log ~ age + sex * breeding
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, database, pathway_name) %>%
+  #do(tidy_lmer(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  do(tidy(lm(props_log ~ age + sex * breeding, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding", "Non breeder - ", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  arrange(database, geneID) %>%
+  kable_style(fdr, 0.1) %>%
+  #column_spec(2, width = "9em") %>%
+  column_spec(c(1:10), width = "4em")
+
+```
+
+
+
+
+# Before and after birth
+
+```{r}
+s_toTest <- s %>%
+  filter(!is.na(study_group6)) %>%
+  droplevels() %>%
+  mutate(study_group = study_group6) %>%
+  mutate(study_group_label = fct_relabel(study_group, function(x) sub(" ", "\n", x))) %>%
+  mutate(study_group = fct_rev(study_group))
+
+ann_colors6 <- list(
+  study_group = setNames(brewer.pal(3, "Set2")[2:3], levels(s_toTest$study_group))
+)
+
+pander(table(s_toTest$study_group), caption = "Number of samples in each category")
+
+
+s_pregnancy <- s_toTest
+```
+
+## KEGG
+
+Reads were aligned to the Kyoto Encyclopedia of Genes and Genomes (downloaded on February 28, 2019) using diamond sequence aligner (PMID:33828273). The resulting protein hits were mapped to KEGG ortholog database. Below is a PCoA plot of Bray-Curtis distances using relative abundances of KEGG orthologs.
+
+```{r}
+dist_toTest <- dist_subset(bc_kegg, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_label, group=SubjectID)) +
+    geom_point(size=2, shape = 16) +
+    geom_line(color="gray50") +
+    scale_color_manual(values=ann_colors$study_group6) +
+    theme_clean_pcoa() + 
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="")
+ggsave("Fig3E_calico_bc_pcoa_kegg.pdf", height = 2, width=4, useDingbats=F)
+
+```
+
+
+```{r}
+summaries_df <-s_toTest %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ study_group,
+    sample_id_var = SampleID, rep_meas_var = SubjectID,
+    shuffle = c(study_group = "within"), permutations=999))  %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) 
+
+summaries_df %>%
+  kable_style()
+```
+
+## KEGG pathways
+
+```{r}
+kegg_pathway_toTest <- kegg_pathway %>%
+  right_join(mutate(s_toTest, SampleID=SampleID), by="SampleID") %>%
+  
+  filter(Pathway_names %in% paths_pregnant) %>%
+  
+  group_by(Pathway) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+props_log ~ study_group
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("study_group", "Before - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+
+```{r fig.width=10, fig.height=6}
+summaries_df %>%
+  #filter(grepl("breeding_status", term)) %>%
+  mutate(Pathway_names = factor(Pathway_names, levels=paths_pregnant)) %>%
+  
+  #mutate(Pathway = paste(Pathway, Pathway_names)) %>%
+  #mutate(Pathway_names = reorder(Pathway_names, to_sort)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>% #arrange(to_sort) %>% View()
+  
+  ggplot(aes(x=estimate, y=Pathway_names, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\npre and post pregnancy",
+      y="", color="", shape=""
+    )
+    
+ggsave("Fig3F_calico_kegg_pathways_pregnancy.pdf", height=5, width=7, useDingbats=F)
+```
+
+
+
+# Fecal vs cecal contents
+
+```{r}
+s_toTest <- s %>%
+  filter(!is.na(SR_sg1)) %>%
+  droplevels()
+
+pander(table(s_toTest$SampleType, s_toTest$sex), caption = "Number of samples in each category")
+
+
+aln_16s_toTest <- aln_16s %>%
+  
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(Genus) %>%
+  mutate(perc_present = mean(props>0)) %>%
+  mutate(mean_ab = mean(props)) %>%
+  mutate(highest_ab = max(props)) %>%
+  ungroup() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+
+pander(table(s_toTest$SampleType, s_toTest$colony_number), caption = "Number of NMRs in each colony")
+
+s_cecal <- s_toTest
+```
+
+
+
+## KEGG
+
+```{r}
+dist_toTest <- dist_subset(bc_kegg, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  mutate(facet = "KEGG") %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=SampleType, shape=sex, group=SubjectID)) +
+    geom_point(size=2) +
+    geom_line(color="gray50") +
+    facet_wrap(~facet) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,16)) +
+    theme_clean_pcoa() + 
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="")
+ggsave("FigSupp1E_calico_bc_pcoa_kegg.pdf", height = 2, width=4, useDingbats=F)
+
+```
+
+```{r}
+summaries_df <-s_toTest %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ sex + SampleType,
+    sample_id_var = SampleID, rep_meas_var = SubjectID,
+    shuffle = c(study_group = "within"), permutations=999))  %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) 
+
+summaries_df %>%
+  kable_style()
+```
+
+## KEGG pathways
+
+```{r}
+kegg_pathway_toTest <- kegg_pathway %>%
+  right_join(mutate(s_toTest, SampleID=SampleID), by="SampleID") %>%
+  
+  #filter(Pathway_names %in% paths_pregnant) %>%
+  
+  group_by(Pathway) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) 
+```
+
+
+props_log ~ sex + SampleType
+
+```{r}
+summaries_df <- kegg_pathway_toTest %>%
+  
+  group_by(Pathway, Pathway_names) %>%
+  do(tidy(nlme::lme(props_log ~ sex + SampleType, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lmer2(nlme::lme(props_logit ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), "study_group")) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), term_string = "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("study_group", "Before - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+  
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "8em")
+```
+```{r fig.width=10}
+summaries_df %>%
+  filter(grepl("Cecal", term)) %>% 
+  filter(fdr<0.1) %>%
+  
+  mutate(Pathway_names = reorder(Pathway_names, estimate)) %>%
+  mutate(direction = ifelse(estimate>0, "Cecal contents", "Feces")) %>%
+  
+  ggplot(aes(x=Pathway_names, y=estimate, color=direction)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.4)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_viridis(end=0.8, discrete = T) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      strip.background = element_blank()
+    ) +
+    guides(color="none") +
+    labs(
+      y="Mean log difference in relative abundances\nbetween fecal and cecal samples",
+      x="", color="Age\ngroups",shape=""
+    )
+
+ggsave("FigSupp1F_calico_pathway_diffAb.pdf", height=8, width=8, useDingbats=F)
+```
+
+## Common orthologs
+
+
+```{r}
+genes_temp <- kegg %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  #summarize(perc_present = mean(props > 0), mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.9) %>%
+  filter(mean_prop > 1e-4) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  left_join(kegg_names, by="geneID") %>%
+  left_join(s_toTest, by="SampleID")
+```
+
+```{r}
+summaries_df <- genes_temp %>%
+
+  group_by(geneID, gene_desc) %>%
+  do(tidy(nlme::lme(props_log ~ sex + SampleType, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### Or whatever the reference level is
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  #select(-term) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(2), width = "15em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.height=6, fig.width=8}
+## find the pathways the fdr<0.1 genes are in
+sig_genes <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  filter(grepl("Cecal", term))
+  
+enrichment_tests <- sig_genes %>%
+  left_join(pathway2ko, by="geneID") %>%
+  filter(Pathway %in% prok_pathway_names$Pathway) %>%
+  filter(!is.na(Pathway)) %>%
+  mutate(gene_desc = paste(geneID, gene_desc)) %>%
+  group_by(Pathway) %>%
+  summarize(num_sig_genes = n(), 
+            genes = paste(gene_desc, collapse = ", "), 
+            num_pos = sum(estimate>0), 
+            num_neg = sum(estimate<0)) %>%
+  ungroup() %>%
+  left_join(num_genes_in_pathway, by="Pathway") %>%
+  filter(num_genes_in_path > 1) %>%
+  filter(num_sig_genes > 1) %>%
+  mutate(p.value = 1 - phyper(num_sig_genes, num_genes_in_path, num_gene_universe-num_genes_in_path, nrow(sig_genes))) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  left_join(prok_pathway_names, by="Pathway") %>%
+  mutate(perc_sig = num_sig_genes/num_genes_in_path) %>%
+  mutate(path_text = paste0(num_pos, "+;", num_neg, "-"))
+
+
+enrichment_tests %>%
+  filter(fdr<0.1) %>%
+  mutate(Pathway_names = reorder(Pathway_names, perc_sig)) %>%
+  ggplot(aes(x = perc_sig, y=Pathway_names, fill=num_sig_genes)) +
+    geom_bar(stat="identity") +
+    geom_text(aes(label=path_text), nudge_x = 0.05, size=3) +
+    scale_fill_viridis(trans="log10") +
+    scale_x_continuous(labels=scales:::percent) +
+    theme_clean() +
+    labs(
+      x= "Percent of genes in pathway\ncorrelated with CES-D",
+      y="", fill="Number of\ngenes\nFDR<0.1"
+    )
+ggsave("igram13_ace_Fig3D_cesd_and_pathways_kegg.pdf", height=6, width=8, useDingbats=F)
+```
+
+
+
+# Make sample sheet for SRA submission
+
+```{r}
+
+s_sra <- full_join(
+  s_age %>% select(SampleID, age_categories) %>% mutate(comparison_age = TRUE),
+  s_social %>% select(SampleID) %>% mutate(comparison_breeding_status = TRUE),
+  by="SampleID") %>%
+  full_join(
+    s_pregnancy %>% select(SampleID, pregnancy=study_group6) %>% mutate(comparison_pregnancy = TRUE),
+    by="SampleID") %>%
+  full_join(
+    s_cecal %>% select(SampleID) %>% mutate(comparison_sample_type = TRUE),
+    by="SampleID") %>%
+  
+  mutate(comparison_age = replace_na(comparison_age, FALSE)) %>%
+  mutate(comparison_breeding_status = replace_na(comparison_breeding_status, FALSE)) %>%
+  mutate(comparison_pregnancy = replace_na(comparison_pregnancy, FALSE)) %>%
+  mutate(comparison_sample_type = replace_na(comparison_sample_type, FALSE)) %>%
+  
+  left_join(
+    select(s, SampleID, SubjectID, sample_type=SampleType, final_dna_concentration_ng_ul, final_library_concentration_ng_ul, HostSpecies, sex, breeding_status, age, colony_number),
+    by="SampleID"
+  ) 
+
+
+s_sra %>%
+  mutate(sample_title = NA) %>%
+  mutate(bioproject_accession = NA) %>%
+  mutate(organism = "animal gut metagenome") %>%
+  mutate(collection_date = 2019) %>%
+  mutate(env_broad_scale = "dense settlement biome") %>%
+  mutate(env_local_scale = "animal-associated environment") %>%
+  mutate(env_medium = ifelse(sample_type %in% "Feces", "fecal material", "cecal material")) %>%
+  mutate(geo_loc_name = "USA") %>%
+  mutate(host = ifelse(HostSpecies %in% "Naked mole rat", "Heterocephalus glaber", "Mus musculus")) %>%
+  mutate(lat_lon="37.665 N 122.393 W") %>%
+  write.table("nmr_samples_for_SRA_mims.txt", row.names = F, quote=F, sep='\t')
+
+
+s_sra %>%
+  select(SampleID) %>%
+  mutate(R1 = paste0(SampleID, "_1.fastq.gz")) %>%
+  mutate(R2 = paste0(SampleID, "_2.fastq.gz")) %>%
+  write.table("nmr_samples_for_SRA_mims_metadata.txt", row.names = F, quote=F, sep='\t')
+
+
+s_sra %>%
+  select(SampleID) %>%
+  write.table("nmr_sampleIDs_for_SRA.txt", row.names = F, quote=F, sep='\t')
+```
+

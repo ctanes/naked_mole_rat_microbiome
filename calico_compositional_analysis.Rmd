@@ -1,0 +1,1698 @@
+---
+title: |
+  ![](logo_blk.png){width=5in}  
+  Naked mole rat compositional analysis
+author: "Ceylan Tanes"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+
+
+
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=6,
+  fig.height=4,
+  fig.align = "center"
+  )
+```
+
+
+```{r child = 'calico_preamble.Rmd'}
+```
+
+
+# Comparison of NMR feces and cecum samples
+
+```{r}
+s_toTest <- s %>%
+  filter(!is.na(SR_sg1)) %>%
+  droplevels()
+
+pander(table(s_toTest$SampleType, s_toTest$sex), caption = "Number of samples in each category")
+
+
+pander(table(s_toTest$SampleType, s_toTest$colony_number), caption = "Number of NMRs in each colony")
+```
+
+
+## Alpha diversity
+
+### Supp Fig 1A
+
+```{r}
+s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+
+  group_by(metric) %>%
+  mutate(maxy = max(alpha) * 1.1) %>%
+  
+  ggplot(aes(x=SampleType, y=alpha, shape=sex, color=SampleType, group=SubjectID)) +
+    geom_hline(aes(yintercept = maxy), color="white") +
+    geom_line(color="gray50") +
+    geom_point() +
+    facet_wrap(~metric, scales = "free_y") +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,16)) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="",
+      y="Alpha diversity value"
+    )
+ggsave("FigSupp1A_alpha.pdf", height=2.5, width=4.6, useDingbats=F)
+```
+
+Linear mixed effects models were used to estimate the change in alpha diversity. Sample type and sex were used as fixed effects. The subjectIDs were used as random effects.
+
+alpha ~ SampleType + sex, random=~1|SubjectID
+
+```{r}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  group_by(metric) %>%
+  do(tidy(nlme::lme(alpha ~ SampleType + sex, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("SampleType", "Feces - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Beta diversity
+
+```{r fig.show='hold', out.width='.49\\linewidth', fig.height=2.5, fig.width=4}
+dist_toTest <- dist_subset(bc, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, shape=sex, color=SampleType, group=SubjectID)) +
+    geom_line(color="gray50") +
+    geom_point(size=2) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,16)) + 
+    theme_clean_pcoa() +
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         color="", shape="Sample\ntype", title="Bray-Curtis")
+
+ggsave("FigSupp1B_calico_bc_pcoa.pdf", height = 2, width=4, useDingbats=F)
+
+
+dist_toTest <- dist_subset(jd, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, shape=sex, color=SampleType, group=SubjectID)) +
+    geom_line(color="gray50") +
+    geom_point(size=2) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,16)) + 
+    theme_clean_pcoa() +
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         color="", shape="Sample\ntype", title="Jaccard")
+ggsave("FigSupp1B_calico_jd_pcoa.pdf", height = 2, width=4, useDingbats=F)
+
+```
+
+PERMANOVA test was used on either Bray-Curtis or Jaccard distances to quantify the compositional shift between the groups.
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ SampleType + sex,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(sex = "between", SampleType = "within"), permutations=perm)) %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = jd, formula = distmat ~ SampleType + sex,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(sex = "between", SampleType = "within"), permutations=perm)) %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+summaries_df %>%
+  kable_style()
+
+```
+
+
+## Differential abundance
+
+Species with >1% relative abundance across all samples are visualized. 
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(Taxa) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+
+  filter(mean_prop > 0.01 | Taxa == "Candidatus Thermoplasmatota Candidatus Methanomassiliicoccus intestinalis") %>%
+  filter(!Taxa %in% c("Bacteria", "Bacteroidota Bacteroidales", "Bacteroidota Bacteroides", "Bacteroidota Phocaeicola", "Verrucomicrobiota Akkermansia")) %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+Linear mixed effects models were used to estimate the change in relative abundance of select taxa. The relative abundances were logit transformed. Sample type and sex were used as fixed effects. The subjectIDs were used as random effects. Only the terms with p.value<0.05 are shown in the table below.
+
+```{r fig.height=13, fig.width=9}
+props_toTest %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  ggplot(aes(x=SampleType, y=props, color=sex, group=SubjectID)) +
+    #geom_boxplot(outlier.alpha = 0) +
+    geom_line() +
+    geom_point() +
+    scale_color_manual(values=ann_colors$sex) +
+    #scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    #guides(color=T) +
+    labs(x="", color="",
+         y="Relative abundance")
+
+
+```
+
+props_log ~ sex + SampleType, random=~1|SubjectID
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  filter(!Taxa %in% "Bacteroidota Bacteroides uniformis") %>%
+  group_by(Taxa) %>%
+  do(tidy(nlme::lme(props_log ~ sex + SampleType, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("SampleType", "Feces - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() #%>%
+  #filter(p.value<0.05)
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+
+```
+
+```{r fig.width=10}
+summaries_df %>%
+  filter(grepl("Cecal", term)) %>%
+  mutate(isSig = ifelse(fdr<0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = sub("Bacteroidota |Bacillota ", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  
+  mutate(toColor = ifelse(estimate>0, "Cecal contents", "Feces")) %>%
+  
+  ggplot(aes(x=Taxa, y=estimate, shape=isSig, color=toColor)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.4)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      strip.background = element_blank()
+    ) +
+    guides(color="none") +
+    labs(
+      y="Mean log difference in relative abundances\nbetween fecal and cecal contents",
+      x="", color="Age\ngroups",shape=""
+    )
+
+ggsave("FigSupp1D_calico_diffAb.pdf", height=3.5, width=6, useDingbats=F)
+```
+
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  #filter(!Taxa %in% "Bacteroidota Bacteroides uniformis") %>%
+  select(SubjectID, Taxa, SampleType, props) %>%
+  pivot_wider(names_from="SampleType", values_from = "props") %>%
+  group_by(Taxa) %>%
+  do(tidy(wilcox.test(.$Feces, .$`Cecal contents`))) %>%
+  ungroup() %>%
+  select(Taxa, statistic, p.value) %>%
+  mutate(fdr = p.adjust(p.value, method="BH"))
+
+```
+
+
+
+# Comparison of breeding status
+
+```{r}
+s_toTest <- s %>%
+  #filter(!is.na(SR_sg2) | !is.na(SR_sg3) | !is.na(SR_sg4)) %>%
+  filter(!is.na(study_group2)) %>%
+  mutate(breeding_status = fct_relevel(breeding_status, "Breeder Pregnant", after=Inf)) %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding = fct_collapse(breeding_status, Breeder = c("Breeder Not Pregnant", "Breeder", "Breeder Pregnant"))) %>%
+  mutate(breeding = fct_rev(breeding)) %>%
+  
+  mutate(breeding_status_simple = sub(" Not Pregnant", "", breeding_status)) %>%
+  mutate(breeding_status_simple = sub("Breeder Pregnant", "Pregnant", breeding_status_simple)) %>%
+  mutate(breeding_status_simple = sub("Non breeder", "Non\nbreeder", breeding_status_simple)) %>%
+  mutate(breeding_status_simple = factor(breeding_status_simple)) %>%
+  mutate(breeding_status_simple = fct_relevel(breeding_status_simple, "Non\nbreeder", after=0)) %>%
+  droplevels()
+
+pander(table(s_toTest$breeding_status, s_toTest$sex), caption = "Number of samples in each category")
+
+
+pander(table(s_toTest$breeding, s_toTest$sex), caption = "Number of samples in each category")
+
+pander(table(s_toTest$breeding_status, s_toTest$age_groups), caption = "Number of samples in each category")
+
+
+s_toTest %>%
+  group_by(breeding_status_all) %>%
+  summarise(mean_age = mean(age), sd_age = sd(age)) %>%
+  ungroup() %>%
+  pander(split.table=Inf, digits=2)
+
+
+
+s_toTest %>%
+  group_by(colony_number) %>%
+  summarize(num_NMRs = n())%>%
+  ungroup() %>%
+  group_by(num_NMRs) %>%
+  summarize(num_colony = n()) %>%
+  ungroup() %>%
+  pander(caption="Number of colonies with 1, 2, 3 NMRs in this subgroup (data available only for run1).")
+
+
+
+pub_colors <- setNames(brewer.pal(12, "Paired")[c(1,5, 2, 6, 8)], levels(s_toTest$breeding_status_all))
+
+```
+
+
+
+
+## Alpha diversity
+
+
+
+### Fig2A
+
+```{r eval=T}
+s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  group_by(metric) %>%
+  mutate(ymax = max(alpha)*1.15) %>%
+  ungroup() %>%
+  
+  
+  
+  ggplot(aes(x=breeding_status_simple, y=alpha, color=breeding_status_simple, shape = sex)) +
+    geom_hline(aes(yintercept = ymax), color="white") +
+    geom_boxplot(outlier.alpha=0) +
+    #geom_point(position = position_jitterdodge()) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(metric~., scales = "free", ncol=2) +
+    scale_color_manual(values=ann_colors$breeding_status_simple) +
+    scale_shape_manual(values=c(1,16)) +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      aspect.ratio=1
+    ) +
+    guides(color=F) +
+    labs(
+      x="", color="",
+      y="Alpha diversity value"
+    )
+
+ggsave("Fig2A_calico_alpha.pdf", height=2.75, width=6)
+```
+
+
+
+Linear models were used to estimate the change in alpha diversity. Tukey method was use for post hoc tests.
+
+alpha ~ age + breeding_status_all
+
+```{r}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  
+  group_by(metric) %>%
+  do(tidy_lm_posthoc(lm(alpha ~ age + breeding_status_all, data=.), "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+Testing if breeder pregnant females are different than all the other groups combined using linear models
+
+alpha ~ age + breeding_status_focus
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  
+  group_by(metric) %>%
+  do(tidy(lm(alpha ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("breeding_status_focus", "Pregnant female - ", term)) 
+
+summaries_df %>%
+  kable_style()
+
+```
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  group_by(metric) %>%
+  do(tidy(lm(alpha ~ age + sex * breeding, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("breeding", "Non breeder - ", term)) 
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  group_by(metric) %>%
+  do(tidy(lm(alpha ~ sex + breeding_status_simple, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("breeding_status_simple", "Non breeder - ", term)) 
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+## Beta diversity
+
+Principle coordinate plot of Bray-Curtis distances
+
+The cluster on the left side was annotated with colony information.
+
+
+
+### Fig2B Bray-Curtis
+
+```{r fig.height=4, fig.width=6}
+dist_toTest <- dist_subset(bc, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pct <- round(pc$values$Relative_eig * 100)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names") %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) 
+
+
+centroids <- pc_df %>%
+  group_by(breeding_status_all, breeding_status_focus) %>%
+  summarize(Axis.1 = mean(Axis.1), Axis.2 = mean(Axis.2), Axis.3 = mean(Axis.3)) %>%
+  ungroup()
+
+pc_df %>%
+  
+  ggplot(aes(x=Axis.1, y=Axis.2, color=breeding_status_simple, shape=sex)) +
+    geom_point() +
+    #geom_point(data=centroids, shape=8) +
+    stat_ellipse(aes(group=breeding_status_simple)) +
+    scale_color_manual(values=ann_colors$breeding_status_simple) +
+    scale_shape_manual(values=c(1, 16)) + 
+    #geom_text_repel(data=filter(pc_df, Axis.1 < -0.25), aes(label=colony_number)) +
+    theme_clean_pcoa() +
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="Breeding\nstatus", title="")
+
+ggsave("Fig2B_PCoA_bc.pdf", height = 2.5, width=4.5, useDingbats=F)
+```
+
+
+### Fig2B Jaccard
+
+```{r fig.height=4, fig.width=6}
+dist_toTest <- dist_subset(jd, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pct <- round(pc$values$Relative_eig * 100)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names") %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) 
+
+
+centroids <- pc_df %>%
+  group_by(breeding_status_all, breeding_status_focus) %>%
+  summarize(Axis.1 = mean(Axis.1), Axis.2 = mean(Axis.2), Axis.3 = mean(Axis.3)) %>%
+  ungroup()
+
+pc_df %>%
+  
+  ggplot(aes(x=Axis.1, y=Axis.2, color=breeding_status_simple, shape=sex)) +
+    geom_point() +
+    #geom_point(data=centroids, shape=8) +
+    stat_ellipse(aes(group=breeding_status_simple)) +
+    scale_color_manual(values=ann_colors$breeding_status_simple) +
+    scale_shape_manual(values=c(1, 16)) + 
+    #geom_text_repel(data=filter(pc_df, Axis.1 < -0.25), aes(label=colony_number)) +
+    theme_clean_pcoa() +
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="Breeding\nstatus", title="")
+
+ggsave("Fig2B_PCoA_jd.pdf", height = 2.5, width=4.5, useDingbats=F)
+```
+
+
+
+
+
+PERMANOVA test was used on either Bray-Curtis or Jaccard distances to quantify the compositional shift between the groups.
+
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+    droplevels() %>%
+    do(adonispost(
+      ., distmat = bc, formula = distmat ~ age + breeding_status_all,
+      sample_id_var = SampleID, permutations=999, which = breeding_status_all, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+    droplevels() %>%
+    do(adonispost(
+      ., distmat = jd, formula = distmat ~ age + breeding_status_all,
+      sample_id_var = SampleID, permutations=999, which = breeding_status_all, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything()) %>%
+  group_by(metric, term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+
+```
+
+```{r}
+
+summaries_df <- rbind(
+  s_toTest %>%
+    mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+    mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ age + breeding_status_focus,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+    mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+    do(adonisplus(
+      ., distmat = jd, formula = distmat ~ age + breeding_status_focus,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r}
+
+summaries_df <- rbind(
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ age + sex * breeding,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = jd, formula = distmat ~ age + sex * breeding,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+```{r}
+
+summaries_df <- rbind(
+  s_toTest %>%
+    do(adonispost(
+      ., distmat = bc, formula = distmat ~ age + sex + breeding_status_simple,
+      sample_id_var = SampleID, permutations=999, which = breeding_status_simple, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    do(adonispost(
+      ., distmat = jd, formula = distmat ~ age + sex + breeding_status_simple,
+      sample_id_var = SampleID, permutations=999, which = breeding_status_simple, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+
+summaries_df %>%
+  kable_style()
+```
+
+## Differential abundance
+
+Species with >1% relative abundance across all samples are visualized. 
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>% 
+  
+  group_by(Taxa) %>%
+  mutate(perc_present = sum(props > 0)/n()) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.01) %>%
+  filter(Taxa != "Bacteria") %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+Linear  models were used to estimate the change in relative abundance of select taxa. The relative abundances were logit transformed. Only the terms with p.value<0.05 are shown in the table below.
+
+```{r fig.height=17, fig.width=12}
+props_toTest %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  
+  ggplot(aes(x=sex, y=props, color=breeding_status)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_point(position = position_jitterdodge()) +
+    scale_color_manual(values=ann_colors$breeding_status) +
+    facet_wrap(~Taxa, scales="free", ncol=3) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    labs(x="", color="",
+         y="Relative abundance")
+```
+
+
+props_log ~ age + breeding_status_all
+
+```{r}
+summaries_df <- props_toTest %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  group_by(Taxa) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age + breeding_status_all, data=.), "breeding_status_all")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+props_log ~ age + breeding_status_focus,
+
+```{r}
+summaries_df <- props_toTest %>%
+  mutate(breeding_status_all = interaction(breeding_status, sex, sep=" ")) %>%
+  mutate(breeding_status_focus = fct_other(breeding_status_all, keep=c("Breeder Pregnant Female"))) %>%
+  group_by(Taxa) %>%
+  do(tidy(lm(props_log ~ age + breeding_status_focus, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  #mutate(term = sub("breeding_status_focus"))
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+props_log ~ age + sex * breeding
+
+```{r}
+summaries_df <- props_toTest %>%
+  group_by(Taxa) %>%
+  do(tidy(lm(props_log ~ age + sex * breeding, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("breeding", "Non breeder - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  group_by(Taxa) %>%
+  do(tidy(lm(props_log ~ age + sex + breeding_status_simple, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("breeding_status_simple", "Non breeder - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+# Comparison of age groups (NMR and mice)
+
+```{r}
+## samples "c.013.357.563", "c.013.371.008",  are age 15: doesn't fit into a category
+extra_data <- data_frame(
+  SampleID = c("c.013.380.331", 
+               "c.013.519.256", "c.013.528.278", "c.057.554.626", "c.107.779.295", 
+               "c.33.568.581", "c.35.783.796", "c.35.806.621", "c.838.383.882", "c.838.519.363"),
+  study_group4_extra = c("Middle Aged", rep("Old", 4), rep("Young", 5))) %>%
+  mutate(SampleID = as.character(SampleID))
+
+
+s_toTest <- s %>%
+  filter(!is.na(study_group4)) %>%
+  filter(!SampleID %in% c("c.013.357.563", "c.013.371.008")) %>%
+  mutate(age_groups = ifelse(is.na(age_groups), as.character(study_group4), as.character(age_groups))) %>%
+  #filter(!age_groups %in% c("NMR F not pregnant", "NMR M breeder")) %>%
+  droplevels() %>%
+  left_join(extra_data, by="SampleID") %>%
+  mutate(age_groups = ifelse(!is.na(study_group4_extra), study_group4_extra, as.character(age_groups))) %>%
+  mutate(age_categories = ifelse(age_groups == "7 to 8", NA, as.character(age_groups))) %>%
+  mutate(age_categories = factor(age_categories)) %>%
+  mutate(age_categories = fct_collapse(age_categories, S1=c("1 to 4", "mouse 3 month", "Young"), S2=c("11 to 13", "mouse 13 month", "Middle Aged"), S3=c("17 to 18", "mouse 18 month"), S4=c("26 to 33", "mouse 25 month", "Old"))) %>%
+  mutate(age_categories_linear = factor(age_categories, ordered=T)) %>%
+  filter(!is.na(age_categories)) %>%
+  mutate(percent_lifespan = ifelse(HostSpecies=="Mouse", age/3, age/40))
+
+pander(table(s_toTest$age_categories, s_toTest$HostSpecies), caption = "Number of samples in each category. Mice at age 13 - 14.5 month are included in S2")
+
+s_toTest %>%
+  ggplot(aes(x=percent_lifespan)) +
+    geom_histogram() +
+    facet_wrap(~HostSpecies)
+
+
+s_toTest %>%
+  group_by(HostSpecies, colony_number) %>%
+  summarize(num_animals = n()) %>%
+  ungroup() %>%
+  group_by(HostSpecies, num_animals) %>%
+  summarize(num_colony = n()) %>%
+  ungroup() %>%
+  pander(caption="Number of colonies with 1, 2, 3 or 6 animals in this subgroup.")
+
+```
+
+## Heatmap: Species level
+
+The heatmap shows the taxa that have a mean relative abundance of >0.5% across the samples.
+
+
+```{r}
+taxa_of_interest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  group_by(Taxa, HostSpecies) %>%
+  summarize(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(max_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  filter(max_prop > 0.01) %>%
+  pull(Taxa) %>%
+  unique()
+  
+```
+
+
+### Figure 1A
+
+
+```{r eval=T}
+props_toPlot <- summed_props[,s_toTest$SampleID]
+props_toPlot <- props_toPlot[apply(props_toPlot,1,mean) >= 0.01,s_toTest$SampleID]
+props_toPlot <- props_toPlot[rownames(props_toPlot) != "Bacteria",]
+
+annotations <- s_toTest %>%
+  mutate(SampleType = factor(SampleType)) %>%
+  arrange(SampleType, HostSpecies, age_categories, sex) %>%
+  select(SampleID, HostSpecies, age_categories, sex)
+  
+rownames(annotations) = annotations$SampleID
+annotations <- select(annotations, -SampleID)
+
+gaps <- annotations %>%
+  mutate(label = interaction(age_categories, HostSpecies)) %>%
+  group_by(label) %>%
+  summarize(nums = n()) %>%
+  ungroup() %>%
+  pull(nums) %>%
+  cumsum()
+
+
+pheatmap(props_toPlot[,rownames(annotations)], 
+         annotation = annotations, 
+         annotation_colors = ann_colors,
+         color = saturated_rainbow(101, saturation_limit=0.4), 
+         breaks = c(0, 1e-10, seq(0.001, 1, length.out = 100)),
+         gaps_col = gaps,
+         filename = "Fig1A_calico_heatmap.pdf", 
+         show_colnames = FALSE,
+         fontsize_col = 8, fontsize_row = 8, 
+         cluster_cols = FALSE, cluster_rows = TRUE,
+         cellheight = 8, cellwidth = 8)
+```
+
+
+
+
+## Alpha diversity
+
+
+### Fig1B Alpha diversity
+
+```{r eval=T}
+s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  filter(!is.na(age_categories)) %>%
+  
+  group_by(metric) %>%
+  mutate(maxy = max(alpha) * 1.1) %>%
+
+  ggplot(aes(x=HostSpecies, y=alpha, shape = HostSpecies)) +
+    geom_hline(aes(yintercept = maxy), color="white") +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75, aes(color=age_categories)) +
+    scale_shape_manual(values=c(17,16)) + 
+    facet_wrap(~metric, scales = "free_y", ncol=1) +
+    scale_color_viridis(end=0.8, discrete = T) +
+    theme_clean() +
+    theme(
+      aspect.ratio=1
+    ) +
+    guides(shape="none") +
+    labs(
+      x="", color="",
+      y="Alpha diversity value"
+    )
+ggsave("Fig1B_alpha.pdf", height=4, width=7, useDingbats=F)
+```
+
+
+
+Linear models were used to estimate the change in alpha diversity over age groups and host species. The intervals are numbered from first to last.
+
+
+alpha ~ HostSpecies + age_categories
+
+```{r}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  group_by(metric) %>%
+  do(tidy(lm(alpha ~ HostSpecies + age_categories, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term))
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+FOr each host species: alpha ~ age_categories
+
+```{r}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  
+  group_by(metric, HostSpecies) %>%
+  do(tidy_lm_posthoc(lm(alpha ~ age_categories, data=.), "age_categories")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept|Residuals", term)) #%>%
+  #mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  #mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Beta-diversity
+
+```{r}
+temp <- dist_groups(dist_subset(bc, s_toTest$SampleID), s_toTest$age_categories) %>%
+  filter(!(is.na(Group1) | is.na(Group2))) %>%
+  merge(select(s_toTest, Item1=SampleID, HostSpecies, SubjectID, age), by="Item1", all.x=T) %>%
+  merge(select(s_toTest, Item2=SampleID, HostSpecies, SubjectID, age), by="Item2", all.x=T) %>%
+  filter(HostSpecies.x == HostSpecies.y) %>%
+  mutate(diff_group = abs(as.numeric(Group2)-as.numeric(Group1))) %>%
+  filter(diff_group == 1 | diff_group == 3) %>%
+  mutate(Label = fct_relevel(Label, "Between S1 and S4", after=Inf)) %>%
+  mutate(Label_linear=factor(Label, ordered=T)) %>%
+  mutate(age_diff = abs(age.y - age.x)) %>%
+  mutate(Distance_normalized = Distance / age_diff) %>%
+  droplevels() 
+```
+
+
+
+
+```{r}
+temp %>%
+  mutate(Label = fct_relabel(Label, function(x) sub(" ", "\n", x))) %>%
+  ggplot(aes(x=Label, y=Distance_normalized, shape=HostSpecies.x)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$HostSpecies) +
+    scale_shape_manual(values = c(1,16)) +
+    theme_clean() +
+    labs(
+      x="", shape="Host\nspecies",
+      y="Distance to consecutive age group\nper year"
+    )
+ggsave("Supp1_calico_consecDistances_ageNormalized.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+
+```{r}
+#summary(lm(Distance~Label_linear*HostSpecies.x, data=temp))
+
+temp %>%
+  group_by(HostSpecies.x) %>%
+  do(tidy(lm(Distance~Label, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("Label", "Between S1 and S2 - ", term)) %>%
+  pander(split.table=Inf, digits=2)
+
+
+```
+
+```{r}
+temp %>%
+  group_by(Label) %>%
+  do(tidy(lm(Distance~HostSpecies.x, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("HostSpecies.x", "Mouse - ", term)) %>%
+  pander(split.table=Inf, digits=2)
+
+
+```
+
+
+
+### Fig 1C
+
+
+```{r}
+
+dist_toTest <- dist_subset(bc, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=age_categories, shape=HostSpecies)) +
+    geom_point() +
+    scale_shape_manual(values=c(17,16)) + 
+    scale_color_viridis(end=0.8, discrete = T) +
+    theme_clean_pcoa() + 
+
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="Age\ngroup") +
+    guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+ggsave("Fig1C_calico_bc_pcoa.pdf", height = 3.5, width=5, useDingbats=F)
+```
+
+
+
+```{r eval=T}
+summaries_df <- rbind(
+  s_toTest %>%
+    group_by(HostSpecies) %>%
+    do(adonispost(
+      ., distmat = bc, formula = distmat ~ age_categories,
+      sample_id_var = SampleID, permutations=perm, which=age_categories, alpha = 1)) %>%
+    ungroup()  %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    group_by(HostSpecies) %>%
+    do(adonispost(
+      ., distmat = jd, formula = distmat ~ age_categories,
+      sample_id_var = SampleID, permutations=perm, which=age_categories, alpha = 1)) %>%
+    ungroup()  %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything()) %>%
+  group_by(metric, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH"))
+  
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+```{r eval=T}
+summaries_df <- rbind(
+  s_toTest %>%
+    group_by(age_categories) %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ HostSpecies,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup()  %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    group_by(age_categories) %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ HostSpecies,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup()  %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+  
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## Differential abundance
+
+Species with >1% relative abundance across all samples are visualized. 
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  group_by(Taxa) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.01) %>%
+  filter(Taxa != "Bacteria") %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  filter(!Taxa %in% c("Bacteroidota Bacteroides", "Bacteroidota Bacteroidales")) %>% # don't include higher level classifications
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+
+
+
+```{r}
+props_toTest %>% 
+  filter(grepl("Methano", Taxa)) %>% 
+  select(SampleID, Taxa, props, breeding_status, HostSpecies, age_categories) %>% 
+  arrange(-props) %>% 
+  write.table(file="calico_Methanomassiliicoccus_intestinalis_abundances.txt", sep='\t', row.names=F, quote=F)
+```
+
+
+Linear models were used to estimate the change in relative abundance of select taxa. The relative abundances were logit transformed.  Only the consecutive age groups are compared. Sex was added as a covariate. The intervals are numbered from first to last.
+
+```{r fig.height=17, fig.width=15}
+props_toTest %>%
+  filter(!is.na(age_categories)) %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  ggplot(aes(x=age_categories, y=props, color=HostSpecies)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$HostSpecies) +
+    facet_wrap(~Taxa, scales="free", ncol=3) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    labs(x="", color="",
+         y="Relative abundance")
+
+
+```
+
+
+props_log ~ age_categories * HostSpecies
+
+```{r}
+summaries_df <- props_toTest %>%
+
+  group_by(Taxa) %>%
+  do(tidy(lm(props_log ~ age_categories * HostSpecies, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+For each age group: props_log ~ HostSpecies
+
+```{r}
+summaries_df <- props_toTest %>%
+
+  group_by(Taxa, age_categories) %>%
+  do(tidy(lm(props_log ~ HostSpecies, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+  
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.1)
+
+```
+
+### Fig1D
+
+```{r fig.width=10}
+summaries_df %>%
+  group_by(Taxa) %>%
+  mutate(hasSig = any(fdr<0.05)) %>%
+  ungroup() %>%
+  filter(hasSig) %>%
+  mutate(isSig = ifelse(fdr<0.05, "q<0.05", "q>0.05")) %>%
+  
+  mutate(Taxa = sub("Bacteroidota |Bacillota ", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  
+  ggplot(aes(x=Taxa, y=estimate, color=age_categories, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.4)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_viridis(end=0.8, discrete = T) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      strip.background = element_blank()
+    ) +
+    labs(
+      y="Mean log difference in relative abundances\nbetween mice and NMR",
+      x="", color="Age\ngroups",shape=""
+    )
+
+ggsave("Fig1D_calico_diffAb.pdf", height=3.5, width=6, useDingbats=F)
+```
+
+
+For each host species: props_log ~ age_categories
+
+```{r}
+summaries_df <- props_toTest %>%
+  group_by(Taxa, HostSpecies) %>%
+  do(tidy_lm_posthoc(lm(props_log ~ age_categories, data=.), "age_categories")) %>%
+  ungroup() %>%
+  filter(!grepl("Residuals", term)) %>%
+  group_by(term, HostSpecies) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+  
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  #filter(Taxa == "Euryarchaeota Methanomassiliicoccus Candidatus Methanomassiliicoccus intestinalis") %>%
+  kable_style(fdr, 0.1)
+
+```
+
+### Fig1E Methanomassiliicoccus intestinalis
+
+```{r}
+props_toTest %>%
+  filter(!is.na(age_categories)) %>%
+  filter(Taxa == "Methanomassiliicoccus intestinalis") %>%
+  droplevels() %>%
+  ggplot(aes(x=HostSpecies, y=props, color=age_categories)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_viridis(end=0.8, discrete=T) +
+    scale_y_continuous(labels=scales:::percent, trans="log10", limit=c(1e-6, 0.7)) +
+    theme_clean() +
+    theme(
+      aspect.ratio=0.8
+    ) +
+    labs(x="", color="",
+         y="Relative abundance")
+
+ggsave("Fig1E_calico_Methanomassiliicoccus_intestinalis.pdf", height=3, width=4, useDingbats=F)
+```
+
+
+
+```{r fig.width=10}
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  group_by(Taxa) %>%
+  mutate(hasSig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(hasSig) %>%
+  mutate(isSig = ifelse(fdr<0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = sub("Bacteroidota |Bacillota ", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  
+  ggplot(aes(x=Taxa, y=estimate, color=term, shape=isSig)) +
+    geom_pointrange(aes(ymin=estimate-std.error, ymax=estimate+std.error), position = position_dodge(width = 0.4)) +
+    geom_hline(yintercept=0, linetype=2) +
+    coord_flip() +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_d3() +
+    #scale_color_viridis(end=0.8, discrete = T) +
+    #scale_color_manual(values=ann_colors$age_categories) +
+    facet_wrap(~HostSpecies) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      strip.background = element_blank()
+    ) +
+    labs(
+      y="Mean log difference in relative abundances\nbetween mice and NMR",
+      x="", color="Age\ngroups",shape=""
+    )
+
+ggsave("calico_diffAb.pdf", height=4, width=8, useDingbats=F)
+```
+
+
+props_log ~ percent_lifespan * HostSpecies
+
+```{r}
+summaries_df <- props_toTest %>%
+  group_by(Taxa) %>%
+  do(tidy(lm(props_log ~ percent_lifespan * HostSpecies, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("sex", "Male - ", term)) %>%
+  mutate(term = sub("HostSpecies", "Mouse - ", term)) %>%
+  mutate(term = sub("age_categories", "S1 - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05)
+
+summaries_df %>%
+  #filter(Taxa == "Euryarchaeota Methanomassiliicoccus Candidatus Methanomassiliicoccus intestinalis") %>%
+  kable_style(fdr, 0.1)
+
+```
+
+
+
+
+
+# Before and after birth
+
+```{r}
+s_toTest <- s %>%
+  filter(!is.na(study_group6)) %>%
+  droplevels() %>%
+  mutate(study_group = study_group6) %>%
+  mutate(study_group = fct_rev(study_group)) %>%
+  mutate(study_group_label = fct_relabel(study_group, function(x) sub(" ", "\n", x))) 
+
+ann_colors6 <- list(
+  study_group = setNames(brewer.pal(3, "Set2")[2:3], levels(s_toTest$study_group))
+)
+
+pander(table(s_toTest$study_group), caption = "Number of samples in each category")
+
+```
+
+
+
+## Alpha diversity
+
+
+### Fig 3A
+```{r}
+s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+
+  ggplot(aes(x=study_group_label, y=alpha, color=study_group_label, group=SubjectID)) +
+    geom_line(color = "black") +
+    geom_point() +
+    facet_wrap(~metric, scales = "free_y") +
+    scale_color_manual(values=ann_colors$study_group6) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    guides(color=F) +
+    labs(
+      x="", color="",
+      y="Alpha diversity value"
+    )
+ggsave("Fig3A_alpha.pdf", height=2.5, width=5, useDingbats=F)
+```
+
+Linear mixed effects models were used to estimate the change in alpha diversity. Sample type and sex were used as fixed effects. The subjectIDs were used as random effects.
+
+
+alpha ~ study_group, random=~1|SubjectID
+
+
+```{r}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  group_by(metric) %>%
+  do(tidy(nlme::lme(alpha ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("study_group", "Before birth - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r eval=F}
+summaries_df <- s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  select(SubjectID, study_group, metric, alpha) %>%
+  mutate(study_group = fct_relabel(study_group, function(x) sub(" ", "_", x))) %>%
+  pivot_wider(names_from=study_group, values_from=alpha) %>%
+  group_by(metric) %>%
+  do(tidy(wilcox.test(.$After_birth, .$Before_birth, paired=T))) %>%
+  ungroup() 
+
+summaries_df %>%
+  kable_style()
+```
+
+```{r}
+s_toTest %>%
+  gather("metric", "alpha", c("richness", "shannon")) %>%
+  mutate(metric = fct_recode(metric, Richness="richness", Shannon="shannon")) %>%
+  select(SubjectID, study_group, metric, alpha) %>%
+  mutate(study_group = fct_relabel(study_group, function(x) sub(" ", "_", x))) %>%
+  pivot_wider(names_from=study_group, values_from=alpha) %>%
+  mutate(diff = After_birth - Before_birth) %>%
+  group_by(metric) %>%
+  summarize(mean_diff = mean(diff), sd_diff=sd(diff))
+```
+
+
+## Beta diversity
+
+
+### Fig 3B/C
+```{r fig.show='hold', out.width='.49\\linewidth', fig.height=2.5, fig.width=4}
+dist_toTest <- dist_subset(bc, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_label, group=SubjectID)) +
+    geom_point(size=2, shape = 16) +
+    geom_line(color="gray50") +
+    scale_color_manual(values=ann_colors$study_group6) +
+    theme_clean_pcoa() + 
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="")
+ggsave("Fig3B_calico_bc_pcoa.pdf", height = 2, width=4, useDingbats=F)
+
+dist_toTest <- dist_subset(jd, s_toTest$SampleID)
+pc <- pcoa(dist_toTest)
+pc_df <- merge(s_toTest, pc$vectors[, 1:3], by.x="SampleID", by.y="row.names")
+pct <- round(pc$values$Relative_eig * 100)
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_label, group=SubjectID)) +
+    geom_point(size=2, shape = 16) +
+    geom_line(color="gray50") +
+    scale_color_manual(values=ann_colors$study_group6) +
+    theme_clean_pcoa() + 
+    labs(x=paste0("PCoA axis 1 (", pct[1], "%)"), 
+         y=paste0("PCoA axis 2 (", pct[2], "%)"),
+         shape="", color="")
+ggsave("Fig3C_calico_jd_pcoa.pdf", height = 2, width=4, useDingbats=F)
+```
+
+PERMANOVA test was used on either Bray-Curtis or Jaccard distances to quantify the compositional shift between the groups.
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = bc, formula = distmat ~ study_group,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(study_group = "within"), permutations=perm)) %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  s_toTest %>%
+    do(adonisplus(
+      ., distmat = jd, formula = distmat ~ study_group,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(study_group = "within"), permutations=perm)) %>%
+    mutate(metric = "Jaccard")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r}
+# pairwise distances
+pairwise_dists <- bind_rows(
+  as.matrix(bc) %>%
+    as_tibble(rownames="SampleID.x") %>%
+    pivot_longer(names_to="SampleID.y", values_to="distance", -SampleID.x) %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  as.matrix(jd) %>%
+    as_tibble(rownames="SampleID.x") %>%
+    pivot_longer(names_to="SampleID.y", values_to="distance", -SampleID.x) %>%
+    mutate(metric = "Jaccard")
+  ) %>%
+  filter(SampleID.x > SampleID.y) %>%
+  filter(SampleID.x != SampleID.y) %>%
+  right_join(select(s_toTest, SampleID.x=SampleID, SubjectID, study_group), by="SampleID.x") %>%
+  right_join(select(s_toTest, SampleID.y=SampleID, SubjectID, study_group), by="SampleID.y") %>%
+  filter((SubjectID.x == SubjectID.y) | (study_group.x == study_group.y)) %>%
+  mutate(groups = case_when(
+    SubjectID.x == SubjectID.y ~ "Within subject",
+    study_group.x ==  study_group.y ~ study_group.x
+  ))
+
+
+pairwise_dists %>%
+  ggplot(aes(x=groups, y=distance)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom() +
+    facet_wrap(~metric, scales="free_y")
+```
+
+
+
+
+## Differential abundance
+
+Species with >1% relative abundance across all samples are visualized. 
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  group_by(Taxa) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.01) %>%
+  filter(!Taxa %in% c("Bacteria", "Bacteroidota", "Bacteroidota Bacteroidales", "Bacteroidota Bacteroides")) %>%
+  mutate(Taxa = sub("Candidatus Thermoplasmatota Candidatus ", "", Taxa)) %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+Linear mixed effects models were used to estimate the change in relative abundance of select taxa. The relative abundances were logit transformed. Sample type and sex were used as fixed effects. The subjectIDs were used as random effects. Only the terms with p.value<0.05 are shown in the table below.
+
+```{r fig.height=13, fig.width=9}
+props_toTest %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  ggplot(aes(x=study_group, y=props, color=study_group, group=SubjectID)) +
+    geom_line(color = "black") +
+    geom_point() +
+    scale_color_manual(values=ann_colors6$study_group) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    labs(x="", color="Study\ngroup",
+         y="Relative abundance")
+```
+
+props_log ~ study_group, random=~1|SubjectID
+
+```{r}
+summaries_df <- props_toTest %>%
+  group_by(Taxa) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|SubjectID, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("study_group", "Before birth - ", term)) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<0.05) %>%
+  select(-effect)
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+```{r}
+props_toTest %>%
+  filter(Taxa %in% (summaries_df %>% filter(p.value < 0.05) %>% pull(Taxa) %>% unique() %>% as.character())) %>%
+  mutate(Taxa = gsub("Bacteroidota ", "", Taxa)) %>%
+  #mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, group=SubjectID)) +
+    geom_line(color = "gray50") +
+    geom_point() +
+    scale_color_manual(values=ann_colors$study_group6) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    guides(color="none") +
+    labs(x="", color="Study\ngroup",
+         y="Relative abundance")
+ggsave("Fig3D_calico_diff_ab_lm.pdf", height = 2.5, width=5, useDingbats=F)
+```
+
+
+
+
+```{r eval=F}
+summaries_df <- props_toTest %>%
+  select(SubjectID, study_group, Taxa, props) %>%
+  mutate(study_group = fct_relabel(study_group, function(x) sub(" ", "_", x))) %>%
+  pivot_wider(names_from=study_group, values_from=props) %>%
+  group_by(Taxa) %>%
+  do(tidy(wilcox.test(.$After_birth, .$Before_birth, paired=T))) %>%
+  ungroup() 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r eval=F}
+props_toTest %>%
+  filter(Taxa %in% (summaries_df %>% filter(p.value < 0.05) %>% pull(Taxa) %>% unique() %>% as.character())) %>%
+  mutate(Taxa = gsub("Bacteroidota ", "", Taxa)) %>%
+  #mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, group=SubjectID)) +
+    geom_line(color = "gray50") +
+    geom_point() +
+    scale_color_manual(values=ann_colors$study_group6) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    guides(color="none") +
+    labs(x="", color="Study\ngroup",
+         y="Relative abundance")
+ggsave("Fig3D_calico_diff_ab_wilcox.pdf", height = 2.5, width=5, useDingbats=F)
+```
+
