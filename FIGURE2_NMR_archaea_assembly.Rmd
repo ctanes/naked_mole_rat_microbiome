@@ -1,0 +1,231 @@
+---
+title: |
+  ![](pcmp_logo.pdf){width=5in}  
+  "Bushman / Calico NMR archaea assembly"
+author: "Naomi G Wilson"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, echo=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=600,
+  fig.width=6,
+  fig.height=4,
+  fig.align = "center"
+  )
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+## Visualization packages
+library(ggplot2)
+library(ggtree)
+library(ggsci)
+library(UpSetR)
+library(tidytree)
+```
+
+```{r fxns}
+theme_clean <- function(){ 
+    theme_bw() %+replace%
+    theme(
+      panel.grid = element_blank(), 
+      strip.background = element_blank()
+    )
+}
+```
+
+```{r load-data}
+## Path to the data folder
+data_dir <- "~/Documents/projects/Bushman_Calico_naked_mole_rats/panaroo"
+coverage_dir <- "~/Documents/projects/Bushman_Calico_naked_mole_rats/read_coverage"
+
+## genes
+genes_presence <- read.delim(file.path(data_dir, "results_hiquality_95/gene_presence_absence_roary.csv"), sep = ",", header = T, stringsAsFactors = F)
+
+## reference genomes metadata
+refs <- read.delim(file.path(data_dir, "desc.tsv"), header = F, sep = "\t", stringsAsFactors = F, col.names = c("acc", "desc", "source", "ncbi_reference", "alias", "SampleID", "Taxa"))
+ncbi_table <- read.delim("~/Documents/projects/Bushman_Calico_naked_mole_rats/Methanomassiliicoccus_intestinalis/AllMethanomassiliicoccus.tsv", header = T, sep = "\t", stringsAsFactors = F)
+
+# Core genome on 3 high quality M. intestinalis - same species, complete or scaffold genomes from NCBI
+phylo_tree <- read.tree(file.path(data_dir, "results_hiquality_95/tree/species_hiqual_core_95.contree"))
+
+# Pangenome by running panaroo core with core threshold set to 0% (on high quality Methanomassiliicoccus)
+pan_tree <- read.tree(file.path(data_dir, "results_pan00/tree/pan_core_gene_00.contree"))
+pangenome_pres_abs <- read.delim(file.path(data_dir, "results_pan00/gene_presence_absence_roary.csv"), sep = ",", header = T, stringsAsFactors = F)
+```
+
+
+# Fig 2A Mash distances from reference genomes
+```{r FIG2A, fig.height=2, fig.width=5, dpi=600}
+mash_coords <- read_delim(file.path(data_dir, "more_genomes/mds_coords.txt")) 
+mash_coords %>%
+  left_join(ncbi_table, by = c("sample" = "SampleID")) %>%
+  mutate(Organism.Name = ifelse(sample == "Bin_1-contigs_reformat", "Methanomassiliicoccus intestinalis NMR MAG", Organism.Name)) %>%
+  mutate(Organism.Name = factor(Organism.Name, levels = c("Methanomassiliicoccus intestinalis NMR MAG", "Candidatus Methanomassiliicoccus intestinalis", "Candidatus Methanomassiliicoccus intestinalis Issoire-Mx1", "Methanomassiliicoccus sp.", "Methanomassiliicoccus luminyensis B10", "Methanomassiliicoccus luminyensis", "Candidatus Methanoplasma termitum", "Candidatus Methanogranum gryphiswaldense", "Methanobrevibacter smithii ATCC 35061", "Methanosphaera stadtmanae DSM 3091"), labels = c("Methanomassiliicoccus intestinalis NMR MAG", "Methanomassiliicoccus intestinalis", "Methanomassiliicoccus intestinalis Issoire-Mx1", "Methanomassiliicoccus sp.", "Methanomassiliicoccus luminyensis B10", "Methanomassiliicoccus luminyensis", "Methanoplasma termitum", "Methanogranum gryphiswaldense", "Methanobrevibacter smithii ATCC 35061", "Methanosphaera stadtmanae DSM 3091"))) %>% # remove Candidatus for the sake of space
+  ggplot(aes(x=coordx, y=coordy, fill=Organism.Name)) +
+  geom_point(aes(shape=Organism.Name),  alpha=0.8, size=2) +
+  scale_fill_d3() +
+  scale_shape_manual(values = c(24, 22, 25, rep(21, 9)), guide="none") +
+  coord_fixed() +
+  theme_bw() +
+  theme(legend.key.size = unit(0.3, units = "cm"),
+        legend.text = element_text(size =8, face = "italic"),
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 7, colour = "black"),
+        axis.title = element_text(size = 7, colour = "black"),
+        axis.ticks = element_line(size = 0.3)) +
+  labs(fill="", x="MDS 1", y="MDS 2") + #title = "Mash distances MDS plot", 
+  guides(fill = guide_legend(override.aes = list(shape=c(24, 22, 25, rep(21, 7)))))
+
+ggsave("../writing/Figures/Fig2A_mash_MDS.pdf", useDingbats=F, height = 2, width = 5, units = "in", dpi=600, device = "pdf")
+```
+
+# Fig 2B COG summaries 
+```{r FIG2B, fig.width=4.5, fig.height=4}
+cogs <- read.delim("~/Documents/projects/Bushman_Calico_naked_mole_rats/cog/cog-24.def.tab.txt", header = F, col.names = c("COG", "SUPER", "Family", "Gene", "FUN", "numerical_code", "fourdigits"))
+superfunctions <- read.delim("~/Documents/projects/Bushman_Calico_naked_mole_rats/cog/cog-24.fun.tab.txt", header = F, col.names = c("ID", "SUPERSUPER", "CODE", "Superfunction"))
+mag_cogs <- read.delim("~/Documents/projects/Bushman_Calico_naked_mole_rats/prokka/Bin_1-contigs_reformat/Bin_1-contigs_reformat.tsv") %>%
+  left_join(cogs, by = "COG") %>%
+  left_join(superfunctions, by = c("SUPER"="ID")) %>%
+  mutate(first_super = ifelse(nchar(SUPER)>1, str_extract(SUPER, pattern="."), SUPER)) %>%
+  left_join(superfunctions, by = c("first_super"="ID"), suffix = c("", "_first_super")) %>%
+  mutate(SUPERSUPER_first_super_name = ifelse(SUPERSUPER_first_super == 1, "INFORMATION STORAGE AND PROCESSING", 
+                ifelse(SUPERSUPER_first_super == 2, "CELLULAR PROCESSES AND SIGNALING",
+                       ifelse(SUPERSUPER_first_super == 3, "METABOLISM", 
+                              ifelse(SUPERSUPER_first_super == 4, "POORLY CHARACTERIZED", SUPERSUPER_first_super)))))
+
+# mag_cogs %>%
+#   filter(ftype=="CDS") %>%
+#   filter(!is.na(SUPER), SUPER != "") %>%
+#   ggplot(aes(y=fct_infreq(Superfunction_first_super), fill=SUPERSUPER_first_super_name)) +
+#   geom_bar() +
+#   theme_clean() +
+#   labs(y="COG Function", x="Number of Genes found", fill="")+
+#   theme(legend.position = "inside", legend.position.inside = c(0.6,0.7))
+
+mag_cogs %>%
+  filter(ftype=="CDS") %>%
+  mutate(plotlabels = str_wrap(ifelse((is.na(SUPER) | SUPER== ""), paste("Other", ftype), Superfunction_first_super), width =40),
+         categories = factor(ifelse(is.na(SUPERSUPER_first_super_name), "No COG assignment", SUPERSUPER_first_super_name), levels=c("CELLULAR PROCESSES AND SIGNALING", "INFORMATION STORAGE AND PROCESSING", "METABOLISM", "POORLY CHARACTERIZED", "No COG assignment"), labels = str_wrap(c("CELLULAR PROCESSES AND SIGNALING", "INFORMATION STORAGE AND PROCESSING", "METABOLISM", "POORLY CHARACTERIZED", "No COG assignment"), width = 20))) %>%
+  ggplot(aes(y=fct_infreq(plotlabels), fill=categories)) +
+  geom_bar() +
+  scale_x_continuous(transform = "log10", limits = c(1, 1300), expand = c(0,0)) +
+  scale_fill_d3() +
+  theme_clean() +
+  # theme()
+  labs(y="COG Function", x="Number of Genes found (log-scale)", fill=NULL)+
+  theme(legend.position = "inside", legend.position.inside = c(0.67,0.81), legend.background = element_rect(fill = NA, colour = "black", linewidth = 0.2),
+        legend.text = element_text(size=6), legend.key.size = unit(0.5, units = "cm"),
+        axis.text = element_text(size=6, color = "black"),
+        axis.ticks = element_line(linewidth = 0.3),
+        axis.title = element_text(size=8))
+
+ggsave("../writing/Figures/Fig2B_assembly_COG_summary.pdf", useDingbats=F, device = "pdf", dpi=600, width = 4.5, height = 4, units = "in")
+# mag_cogs %>%
+#   filter(ftype=="CDS") %>%
+#   filter(!is.na(SUPER), SUPER != "") %>%
+#   select(Superfunction_first_super, COG, SUPERSUPER_first_super_name) %>% distinct() %>%
+#   ggplot(aes(y=fct_infreq(Superfunction_first_super), fill=SUPERSUPER_first_super_name)) +
+#   geom_bar() +
+#   theme_clean() +
+#   labs(y="COG Function", x="Number of Unique COGs found", fill="") +
+#   theme(legend.position = "inside", legend.position.inside = c(0.6,0.7))
+```
+
+# Fig 2C Pangenome Tree - MAG with other genomes in genus
+```{r FIG2C, fig.height=5, fig.width=4}
+pangenome_desc <- read.delim("../Methanomassiliicoccus_intestinalis/Methanomassiliicoccus_scaffold_or_complete.tsv") %>%
+  mutate(species = word(gsub("Candidatus |uncultured ", "", Organism.Name), start = 2, end = 2)) # NCBI summary table
+pangenome_desc_labels <- rbind(pangenome_desc %>%     
+  mutate(label = paste0(Assembly.Accession, "_", Assembly.Name, "_genomic")) %>%
+  select(Assembly.Name, label), c("NMR MAG", "Bin_1-contigs_reformat")) %>%
+  column_to_rownames("label")
+pan_tree_relabeled <- pan_tree
+pan_tree_relabeled$tip.label <- pangenome_desc_labels[pan_tree$tip.label,]
+
+s_tree <- as_tibble(pan_tree_relabeled) %>%
+  left_join(pangenome_desc, by = c("label"="Assembly.Name"), keep = F) %>%
+  mutate(species = ifelse(label=="NMR MAG", "intestinalis", species))
+
+# ggtree(pan_tree_relabeled) %<+% s_tree +
+#   geom_tiplab(geom="text", align=F, size=4) + xlim_tree(10) + ggtitle("Genus pangenome tree") +
+#   geom_tippoint(aes(color = species))
+
+ggtree(root(pan_tree_relabeled, outgroup = "ASM3679952v1", resolve.root = TRUE), branch.length = 'none') %<+% s_tree +
+  geom_tiplab(geom="text", align=F, linesize=1, size=3, offset = 0.25) +
+  geom_tippoint(aes(color = species), size=2) + 
+  scale_color_d3() +
+  xlim_tree(19) + 
+  # ggtitle("Genus cladogram") +
+  theme(legend.text = element_text(face = "italic"),
+        legend.position.inside = c(0.17,0.91), 
+        legend.position = "inside", legend.background = element_rect(colour = "black", linewidth = 0.4),
+        legend.key.size = unit(0.2, units = "cm"))
+
+ggsave("../writing/Figures/Fig2C_genus_cladogram.pdf", useDingbats=F, device = "pdf", dpi = 400, width = 4, height = 5, units = "in")
+```
+
+# Fig 2D Genes had to be present in 95% of the high quality *M. intestinalis* genomes:   
+```{r FIG2D, fig.height=4, fig.width=3.5}
+# Phylogenomics of samples - Core gene alignment from prokka .gff files using iqtree and panaroo
+# referenced this helpful tutorial: https://yulab-smu.top/treedata-book/chapter7.html
+
+labs <- data.frame(row.names = ncbi_table$SampleID, ncbi_table$Assembly.Name)
+
+phylo_tree_relabeled <- phylo_tree
+phylo_tree_relabeled$tip.label <- str_wrap(gsub("_", " ", replace_na(labs[phylo_tree$tip.label,], replace = "NMR MAG")), width = 20)
+
+s_tree <- as_tibble(phylo_tree_relabeled) %>%
+  left_join(ncbi_table, by = c("label" = "Organism.Name"), keep = T) 
+
+ggtree(phylo_tree_relabeled) %<+% refs +
+  geom_tiplab(geom="text", align=F, size=6) + xlim_tree(0.013) #+ ggtitle("Species core genome tree")
+
+ggsave(filename = "../writing/Figures/Fig2D_core_tree.pdf", device = "pdf", useDingbats=F, dpi = 400, height = 4, width = 3.5, units = "in")
+
+# ggtree(root(phylo_tree_relabeled, outgroup = "ASM40422v1", resolve.root = TRUE), branch.length = 'none') %<+% refs + geom_tiplab(geom="text", align=F, linesize=3, size=8) + xlim_tree(5) + ggtitle("Species core genome cladogram")
+```
+
+# Fig 2E Upset plot
+```{r FIG2E, fig.width=8, fig.height=5.25, dpi = 400}
+# install.packages("UpSetR")
+## helpful examples: https://cran.r-project.org/web/packages/UpSetR/vignettes/basic.usage.html
+set1 <- unique(pangenome_pres_abs %>% filter(Bin_1.contigs_reformat!="", !is.na(Bin_1.contigs_reformat)) %>% pull(Gene))
+set2 <- unique(pangenome_pres_abs %>% filter(GCA_902383905.1_UHGG_MGYG.HGUT.02160_genomic!="", !is.na(GCA_902383905.1_UHGG_MGYG.HGUT.02160_genomic)) %>% pull(Gene))
+set3 <- unique(pangenome_pres_abs %>% filter(GCA_000404225.1_ASM40422v1_genomic!="", !is.na(GCA_000404225.1_ASM40422v1_genomic)) %>% pull(Gene))
+set4 <- unique(pangenome_pres_abs %>% filter(GCA_006954445.1_ASM695444v1_genomic!="", !is.na(GCA_006954445.1_ASM695444v1_genomic)) %>% pull(Gene))
+pdf(file = "../writing/Figures/Fig2E_species_gene_presence_upset_plot.pdf", useDingbats=F, width = 8, height = 5.25, onefile = F)
+upset(fromList(list("ASM695444v1" = set4, "NMR" = set1, "ASM40422v1" = set3, "UHGG_MGYG.HGUT.02160" = set2)), 
+      sets = c("UHGG_MGYG.HGUT.02160", "ASM40422v1", "NMR", "ASM695444v1"), 
+      keep.order=T, 
+      order.by = "freq", 
+      line.size=1, 
+      point.size=3, 
+      mainbar.y.label = "Gene Intersections", 
+      sets.x.label = "Genes Per Genome", 
+      # att.pos = "bottom", #color.pal=ggsci::pal_d3(),
+      text.scale=1.5) #group.by = "sets", cutoff = 3, , mb.ratio=c(0.7, 0.3)
+dev.off()
+# ggsave(plot = upsetp, "../writing/Figures/Fig2E_species_gene_presence_upset_plot.pdf", device = "pdf", width = 8, height = 5, units = "in", useDingbats=F, dpi = 400)
+
+# length(intersect(set1, intersect(set2, intersect(set3, set4))))
+# length(intersect(set1, intersect(set2, intersect(set3, set4))))
+# venn diagram
+# library(ggVennDiagram)
+# ggVennDiagram::ggVennDiagram(
+#   x = list("NMR" = set1, "UHGG_MGYG.HGUT.02160" = set2, "ASM40422v1" = set3,"ASM695444v1" = set4)
+# ) +
+#   scale_fill_binned(breaks=c(0, 5, 10, 50, 100, 500, 1000, 1600), guide = guide_coloursteps(even.steps = T, show.limits = F), type = "viridis")
+```
